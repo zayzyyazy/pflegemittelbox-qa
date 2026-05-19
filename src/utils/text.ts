@@ -1,0 +1,6 @@
+export const id = (prefix='id') => prefix + '_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
+export const clamp = (text = '', max = 120) => text.length > max ? text.slice(0, max - 1).trim() + '...' : text;
+export const shortCallId = (callId: string) => callId.length > 12 ? callId.slice(0, 8) + '...' : callId;
+export const cleanCallIdFromFilename = (name: string) => name.replace(/.(wav|mp3|m4a|webm|ogg)$/i, '').replace(/-call-recording.*$/i, '').replace(/[_ ]+$/,'');
+export const similarity = (a='', b='') => { const aw = new Set(a.toLowerCase().split(/W+/).filter(Boolean)); const bw = new Set(b.toLowerCase().split(/W+/).filter(Boolean)); if (!aw.size || !bw.size) return 0; let hit = 0; aw.forEach(w => { if (bw.has(w)) hit++; }); return hit / Math.max(aw.size, bw.size); };
+export const downloadText = (name: string, text: string) => { const blob = new Blob([text], { type: 'text/markdown' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); };

@@ -1,0 +1,3 @@
+import type { Database } from './storageService'; import type { Experiment } from '../types/Experiment'; import { nowIso } from '../utils/dates'; import { id } from '../utils/text';
+export const upsertExperiment = (db: Database, exp: Partial<Experiment>) => { const now = nowIso(); const full = { ...exp, id: exp.id || id('exp'), created_at: exp.created_at || now, updated_at: now, related_call_ids: exp.related_call_ids || [] } as Experiment; const experiments = db.experiments.some(e => e.id === full.id) ? db.experiments.map(e => e.id === full.id ? full : e) : [full, ...db.experiments]; return { ...db, experiments }; };
+export const deleteExperiment = (db: Database, id: string) => ({ ...db, experiments: db.experiments.filter(e => e.id !== id) });

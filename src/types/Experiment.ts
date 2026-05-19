@@ -1,0 +1,2 @@
+export type ExperimentResult = 'better' | 'worse' | 'no_change' | 'inconclusive';
+export interface Experiment { id: string; date: string; experiment_name: string; linked_issue_id?: string; changed_setting: string; old_value: string; new_value: string; expected_effect: string; actual_effect: string; result: ExperimentResult; related_call_ids: string[]; notes: string; created_at: string; updated_at: string; }

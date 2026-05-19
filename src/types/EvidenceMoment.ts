@@ -1,0 +1,4 @@
+import type { IssueSeverity } from './Issue';
+export type EvidenceSpeaker = 'caller' | 'agent' | 'unknown';
+export type EvidenceMomentType = 'caller_cut_off' | 'long_pause' | 'repeated_question' | 'authentication_friction' | 'missing_integration' | 'robotic_pacing' | 'unresolved_request' | 'escalation' | 'other';
+export interface EvidenceMoment { id: string; call_id: string; issue_id?: string; timestamp_start_seconds?: number; timestamp_end_seconds?: number; speaker: EvidenceSpeaker; moment_type: EvidenceMomentType; severity: IssueSeverity; quote_or_transcript_excerpt: string; explanation: string; recommended_fix: string; voice_cue_notes: string; created_at: string; updated_at: string; }

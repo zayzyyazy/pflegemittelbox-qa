@@ -1,0 +1,1 @@
+export interface SavedInsight { id: string; title: string; insight_type: string; summary: string; question?: string; answer?: string; context_type?: 'project' | 'issue' | 'call'; related_call_id?: string; related_issue_id?: string; raw_json?: string; created_at: string; }
