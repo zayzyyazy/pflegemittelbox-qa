@@ -1,0 +1,34 @@
+[
+  {
+    "call_id": "06a23e17-57eb-769c-8000-00128d4df8f7",
+    "expected_anliegen": "general_information_question",
+    "expected_result": "no",
+    "min_evidence": 0,
+    "max_evidence": 5,
+    "notes": "Stub transcript until live Whisper import"
+  },
+  {
+    "call_id": "06a23e28-2f42-7695-8000-ae64f02586da",
+    "expected_anliegen": "order_status",
+    "expected_result": "yes",
+    "min_evidence": 0,
+    "max_evidence": 5,
+    "notes": "Stub transcript until live Whisper import"
+  },
+  {
+    "call_id": "06a23e54-e310-7022-8000-d3f831086037",
+    "expected_anliegen": "box_or_product_change",
+    "expected_result": "yes",
+    "min_evidence": 0,
+    "max_evidence": 5,
+    "notes": "Known prod call — risk_hints surface in FindingsStrip"
+  },
+  {
+    "call_id": "06a23e90-8581-7d55-8000-e266563c27a8",
+    "expected_anliegen": "cancel_or_pause",
+    "expected_result": "yes",
+    "min_evidence": 0,
+    "max_evidence": 5,
+    "notes": "Stub transcript until live Whisper import"
+  }
+]

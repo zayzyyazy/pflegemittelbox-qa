@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Call QA Cockpit",
+  "productName": "Pflegemittelbox",
   "version": "1.0.0",
-  "identifier": "com.leapingai.callqacockpit",
+  "identifier": "com.leapingai.pflegemittelbox",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -12,14 +12,20 @@
   "app": {
     "windows": [
       {
-        "title": "AI Call QA Cockpit",
+        "title": "Pflegemittelbox",
         "width": 1320,
         "height": 860,
         "minWidth": 940,
         "minHeight": 640
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**"]
+      }
+    }
   },
   "bundle": {
     "active": true,

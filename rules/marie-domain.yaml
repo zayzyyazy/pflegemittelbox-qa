@@ -1,0 +1,44 @@
+# Marie / Pflegebox domain taxonomy for extraction and eval
+version: 1
+
+anliegen:
+  box_or_product_change:
+    label: Box / product change
+    keywords: [pflegebox, produkte ändern, handschuhe, desinfektion, reaktivierung]
+  order_status:
+    label: Order status
+    keywords: [lieferung, paket, wann kommt, wo bleibt, sendung]
+  cancel_or_pause:
+    label: Cancel or pause
+    keywords: [kündigen, kündigung, abbestellen, pausieren, nicht mehr bekommen]
+  address_or_account_change:
+    label: Address / account change
+    keywords: [adresse, umzug, kontodaten]
+  authentication_problem:
+    label: Authentication problem
+    keywords: [identität, versicherungsnummer falsch, geburtsdatum stimmt nicht]
+  new_customer_onboarding:
+    label: New customer onboarding
+    keywords: [neukunde, erstbestellung, registrierung]
+  general_information_question:
+    label: General information
+    keywords: [information, erklärung, was ist enthalten]
+  other:
+    label: Other
+    keywords: []
+
+evidence_types:
+  - repeated_authentication
+  - missing_alternative_verification
+  - caller_cut_off
+  - long_pause
+  - wrong_workflow
+  - unresolved_request
+  - escalation
+  - product_availability
+  - missing_integration
+  - manual_highlight
+
+recall_first:
+  max_ai_candidates: 5
+  require_reviewer_confirm: true

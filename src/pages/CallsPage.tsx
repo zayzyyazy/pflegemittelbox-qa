@@ -1,55 +1,256 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Database } from '../services/storageService';
 import type { CallReview } from '../types/CallReview';
-import { anliegenLabels, normalizeAnliegen } from '../utils/anliegen';
-import { shortCallId, id, cleanCallIdFromFilename } from '../utils/text';
-import { findDuplicate } from '../services/duplicateService';
-import { upsertCall } from '../services/callsService';
-import { upsertIssue } from '../services/issuesService';
-import { generateCallDraft, transcribeAudio } from '../services/openaiService';
-import { nowIso, secondsToClock } from '../utils/dates';
-import { Modal } from '../components/ui/Modal';
-import { Field } from '../components/ui/Field';
-import { Badge } from '../components/ui/Badge';
-import { AskAiPanel } from '../components/ask-ai/AskAiPanel';
-import { BatchTranscribe } from '../components/batch/BatchTranscribe';
+import {
+  callMatchesSearch,
+  countActiveFilters,
+  DEFAULT_CALL_FILTERS,
+  hasNonDefaultViewMode,
+  loadSavedFilters,
+  matchesCallerRequestFilter,
+  matchesEvidenceTypeFilter,
+  matchesMainIssueFilter,
+  matchesResultFilter,
+  matchesTriageFilter,
+  matchesReviewStatusFilter,
+  saveCallFilters,
+  sortCallsForReview,
+  type CallTriageFilter,
+  type GroupByMode,
+  type ReviewStatusFilter
+} from '../utils/filterNormalize';
+import { groupCalls } from '../utils/callGrouping';
+import { toggleCallFlag } from '../services/callTriageService';
+import { deleteCallWithAudio } from '../services/callsService';
+import { ConfirmDeleteModal } from '../components/ui/ConfirmDeleteModal';
+import { buildDuplicateIndex } from '../services/duplicateService';
+import { CallReviewShell } from '../components/calls/CallReviewShell';
+import { CallFiltersBar } from '../components/calls/CallFiltersBar';
+import { GroupedCallsView } from '../components/calls/GroupedCallsView';
+import { CallsTableView } from '../components/calls/CallsTableView';
+import { callWorkspace, loadSavedWorkspace, saveWorkspace, workspaceLabel } from '../utils/workspace';
 
-const blank = (): Partial<CallReview> => ({ call_id: '', date: new Date().toISOString().slice(0, 10), duration_seconds: 0, customer_type: '', caller_context: '', anliegen: 'other', solved_status: 'partially', overall_rating: 5, naturalness_rating: 5, caller_cut_off: false, awkward_pauses: false, robotic_pacing: false, latency_too_long: false, repeated_question: false, identification_problem: false, missing_integration: false, workflow_node: '', root_cause_category: 'Other', breakpoint_notes: '', suggested_improvement: '', reviewer_notes: '', call_summary: '', transcript: '', audio_file_name: '', audio_file_size: 0, audio_file_type: '', audio_file_last_modified: 0, linked_issue_ids: [] });
+export function CallsPage({
+  db,
+  setDb,
+  selectedCallId,
+  selectedEvidenceId,
+  onClearSelection,
+  initialWorkspace,
+  onWorkspaceChange
+}: {
+  db: Database;
+  setDb: (db: Database) => void;
+  selectedCallId?: string;
+  selectedEvidenceId?: string;
+  onClearSelection?: () => void;
+  initialWorkspace?: 'production' | 'test';
+  onWorkspaceChange?: (workspace: 'production' | 'test') => void;
+}) {
+  const saved = loadSavedFilters();
+  const [workspace, setWorkspaceState] = useState<'production' | 'test'>(
+    () => initialWorkspace || loadSavedWorkspace()
+  );
+  const setWorkspace = (next: 'production' | 'test') => {
+    setWorkspaceState(next);
+    saveWorkspace(next);
+    onWorkspaceChange?.(next);
+  };
+  const [q, setQ] = useState(saved.q || '');
+  const [detail, setDetail] = useState<CallReview | null>(() =>
+    selectedCallId ? db.calls.find(c => c.id === selectedCallId) || null : null
+  );
+  const [requestFilter, setRequestFilter] = useState<CallReview['anliegen'] | 'all'>(saved.requestFilter || 'all');
+  const [resultFilter, setResultFilter] = useState<CallReview['solved_status'] | 'all'>(saved.resultFilter || 'all');
+  const [mainIssueFilter, setMainIssueFilter] = useState(saved.mainIssueFilter || 'all');
+  const [triageFilter, setTriageFilter] = useState<CallTriageFilter>(saved.triageFilter || 'all');
+  const [reviewStatusFilter, setReviewStatusFilter] = useState<ReviewStatusFilter>(saved.reviewStatusFilter || 'all');
+  const [evidenceTypeFilter, setEvidenceTypeFilter] = useState(saved.evidenceTypeFilter || 'all');
+  const [viewMode, setViewMode] = useState<'grouped' | 'table'>(saved.viewMode || 'grouped');
+  const [groupBy, setGroupBy] = useState<GroupByMode>(saved.groupBy || 'anliegen');
+  const [deleteCallId, setDeleteCallId] = useState<string | null>(null);
 
-export function CallsPage({ db, setDb }: { db: Database; setDb: (db: Database) => void }) {
-  const [q, setQ] = useState('');
-  const [detail, setDetail] = useState<CallReview | null>(null);
-  const [add, setAdd] = useState(false);
-  const [batch, setBatch] = useState(false);
-  const rows = useMemo(() => db.calls.filter(c => JSON.stringify(c).toLowerCase().includes(q.toLowerCase())), [db.calls, q]);
-  return <main className="page"><div className="page-head"><div><h1>Call Reviews</h1><p>Import, draft, approve, and turn calls into evidence.</p></div><div className="row"><button onClick={() => setBatch(!batch)}>Batch transcribe</button><button className="primary" onClick={() => setAdd(true)}>Add call</button></div></div>{batch && <BatchTranscribe db={db} setDb={setDb} />}<section className="panel"><input className="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Search calls, notes, root causes..." /><table><thead><tr><th>Call</th><th>Date</th><th>Anliegen</th><th>Solved</th><th>Ratings</th><th>Root cause</th><th>Workflow</th><th>Audio</th><th>Issues</th></tr></thead><tbody>{rows.map(c => <tr key={c.id} onClick={() => setDetail(c)}><td>{shortCallId(c.call_id)}</td><td>{c.date}</td><td>{anliegenLabels[c.anliegen]}</td><td><Badge tone={c.solved_status === 'yes' ? 'green' : c.solved_status === 'no' ? 'red' : 'yellow'}>{c.solved_status}</Badge></td><td>{c.overall_rating}/{c.naturalness_rating}</td><td>{c.root_cause_category}</td><td>{c.workflow_node}</td><td>{c.audio_file_name}</td><td>{c.linked_issue_ids.length}</td></tr>)}</tbody></table></section>{detail && <CallDetail call={detail} db={db} setDb={setDb} onClose={() => setDetail(null)} />} {add && <AddCallModal db={db} setDb={setDb} onClose={() => setAdd(false)} />}</main>;
-}
+  useEffect(() => {
+    if (selectedCallId) setDetail(db.calls.find(c => c.id === selectedCallId) || null);
+  }, [selectedCallId, db.calls]);
 
-function CallDetail({ call, db, setDb, onClose }: { call: CallReview; db: Database; setDb: (db: Database) => void; onClose: () => void }) {
-  const [ask, setAsk] = useState(false);
-  const evidence = db.evidence.filter(e => e.call_id === call.id);
-  function createIssue() { const severity = call.overall_rating <= 4 ? 'high' : 'medium'; const issue = { title: 'Issue from ' + call.call_id, category: call.root_cause_category, severity: severity as 'high' | 'medium', status: 'active' as const, description: call.breakpoint_notes || call.call_summary, suggested_fix: call.suggested_improvement, notes: call.reviewer_notes, linked_call_ids: [call.id] }; setDb(upsertIssue(db, issue)); alert('Issue created'); }
-  const summary = ['Issue evidence from call ' + call.call_id, 'Anliegen: ' + anliegenLabels[call.anliegen], 'Solved: ' + call.solved_status, 'Summary: ' + call.call_summary, 'Evidence:', ...evidence.map(e => '- ' + secondsToClock(e.timestamp_start_seconds) + ': ' + e.quote_or_transcript_excerpt + ' - ' + e.explanation)].join('\n');
-  return <Modal title={'Call ' + call.call_id} onClose={onClose} wide><div className="detail-grid"><section><h3>Overview</h3><p>{call.call_summary}</p><div className="chips"><Badge>{anliegenLabels[call.anliegen]}</Badge><Badge tone={call.solved_status === 'yes' ? 'green' : call.solved_status === 'no' ? 'red' : 'yellow'}>{call.solved_status}</Badge><Badge>{call.root_cause_category}</Badge></div><p><b>Workflow:</b> {call.workflow_node}</p><p><b>Audio:</b> {call.audio_file_name} ({call.audio_file_type}, {call.audio_file_size} bytes)</p>{call.audio_original_path && <button>Open recording</button>}<h3>Evidence moments</h3>{evidence.map(e => <div className="evidence" key={e.id}><Badge tone={e.severity === 'high' ? 'red' : 'yellow'}>{e.moment_type}</Badge><b>{secondsToClock(e.timestamp_start_seconds)}</b><blockquote>{e.quote_or_transcript_excerpt}</blockquote><p>{e.explanation}</p><p><b>Fix:</b> {e.recommended_fix}</p></div>)}</section><section><h3>Notes</h3><p><b>Breakpoint:</b> {call.breakpoint_notes}</p><p><b>Suggested improvement:</b> {call.suggested_improvement}</p><p><b>Reviewer:</b> {call.reviewer_notes}</p><details><summary>Transcript</summary><pre className="transcript">{call.transcript}</pre></details><div className="row wrap"><button>Edit call</button><button>Start experiment from this call</button><button onClick={() => setAsk(!ask)}>Ask AI</button><button onClick={createIssue}>Create issue from this call</button><button onClick={() => navigator.clipboard.writeText(summary)}>Copy evidence for meeting</button></div>{ask && <AskAiPanel db={db} setDb={setDb} contextType="call" relatedId={call.id} />}</section></div></Modal>;
-}
+  useEffect(() => {
+    saveCallFilters({
+      q,
+      requestFilter,
+      resultFilter,
+      mainIssueFilter,
+      triageFilter,
+      reviewStatusFilter,
+      evidenceTypeFilter,
+      viewMode,
+      groupBy
+    });
+  }, [q, requestFilter, resultFilter, mainIssueFilter, triageFilter, reviewStatusFilter, evidenceTypeFilter, viewMode, groupBy]);
 
-function AddCallModal({ db, setDb, onClose }: { db: Database; setDb: (db: Database) => void; onClose: () => void }) {
-  const [tab, setTab] = useState<'manual' | 'paste' | 'audio'>('manual');
-  const [form, setForm] = useState<Partial<CallReview>>(blank());
-  const [review, setReview] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [ctx, setCtx] = useState('');
-  const [transcript, setTranscript] = useState('');
-  const [busy, setBusy] = useState('');
-  const [dup, setDup] = useState<any>(null);
-  const update = (p: Partial<CallReview>) => setForm(f => ({ ...f, ...p }));
-  async function draftFromText() { setBusy('Generating draft'); try { const d = await generateCallDraft(db.settings, { reviewText: review }); setForm({ ...blank(), ...d.call }); } catch (e: any) { alert(e.message); } finally { setBusy(''); } }
-  async function doTranscribe() { if (!file) return; setBusy('Transcribing'); try { setTranscript(await transcribeAudio(db.settings, file)); } catch (e: any) { alert(e.message); } finally { setBusy(''); } }
-  async function draftFromTranscript() { if (!file) return; setBusy('Generating draft'); try { const d = await generateCallDraft(db.settings, { transcript, file, reviewerContext: ctx }); setForm({ ...blank(), ...d.call, transcript: d.call.transcript || transcript }); } catch (e: any) { alert(e.message); } finally { setBusy(''); } }
-  function save(anyway = false) { const now = nowIso(); const full = { ...blank(), ...form, id: form.id || id('call'), call_id: form.call_id || (form.audio_file_name ? cleanCallIdFromFilename(form.audio_file_name) : id('callid')), created_at: form.created_at || now, updated_at: now } as CallReview; const match = findDuplicate(full, db.calls); if (match && !anyway) { setDup(match); return; } setDb(upsertCall(db, full)); onClose(); }
-  return <Modal title="Add Call Review" onClose={onClose} wide><div className="tabs"><button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>Manual entry</button><button className={tab === 'paste' ? 'active' : ''} onClick={() => setTab('paste')}>Paste Review</button><button className={tab === 'audio' ? 'active' : ''} onClick={() => setTab('audio')}>Transcribe Audio</button></div>{tab === 'paste' && <section><textarea value={review} onChange={e => setReview(e.target.value)} placeholder="Paste messy human review..." /><button className="primary" onClick={draftFromText}>{busy || 'Generate Draft'}</button></section>}{tab === 'audio' && <section><p className="privacy">Audio is sent to OpenAI only when transcription is started. Audio binaries are not saved locally. Transcript and file metadata are saved with approved call reviews.</p><div className="drop"><input type="file" accept="audio/wav,audio/mp3,audio/mpeg,audio/m4a,audio/webm,audio/ogg" onChange={e => { const f = e.target.files?.[0]; if (f) { setFile(f); update({ audio_file_name: f.name, audio_file_size: f.size, audio_file_type: f.type, audio_file_last_modified: f.lastModified, call_id: cleanCallIdFromFilename(f.name) }); } }} /><span>{file ? file.name : 'Drop audio or choose file. WAV recommended.'}</span></div><textarea value={ctx} onChange={e => setCtx(e.target.value)} placeholder="Optional reviewer context" /><div className="row"><button onClick={doTranscribe}>Step 1: Transcribe audio</button><button onClick={draftFromTranscript} disabled={!transcript}>Step 2: Generate draft from transcript</button><button onClick={() => navigator.clipboard.writeText(transcript)}>Copy transcript</button></div><details><summary>Transcript preview</summary><pre className="transcript">{transcript}</pre></details></section>}<CallForm form={form} update={update} /><div className="row end"><button onClick={() => save(false)} className="primary">Save approved call</button></div>{dup && <div className="duplicate"><h3>This looks like a duplicate call.</h3><p>Matching call ID: {dup.call.call_id}</p><p>Date: {dup.call.date}</p><p>Anliegen: {anliegenLabels[dup.call.anliegen as keyof typeof anliegenLabels]}</p><p>Reason: {dup.reason}</p><button onClick={() => alert(JSON.stringify(dup.call, null, 2))}>Open existing</button><button onClick={() => save(true)}>Save anyway</button><button onClick={() => setDup(null)}>Cancel</button></div>}</Modal>;
-}
+  const scopeCalls = useMemo(
+    () => db.calls.filter(c => callWorkspace(c) === workspace),
+    [db.calls, workspace]
+  );
 
-function CallForm({ form, update }: { form: Partial<CallReview>; update: (p: Partial<CallReview>) => void }) {
-  return <section className="form-grid"><Field label="Call ID"><input value={form.call_id || ''} onChange={e => update({ call_id: e.target.value })} /></Field><Field label="Date"><input type="date" value={form.date || ''} onChange={e => update({ date: e.target.value })} /></Field><Field label="Anliegen"><select value={form.anliegen} onChange={e => update({ anliegen: normalizeAnliegen(e.target.value) })}>{Object.entries(anliegenLabels).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field><Field label="Solved"><select value={form.solved_status} onChange={e => update({ solved_status: e.target.value as any })}><option>yes</option><option>partially</option><option>no</option></select></Field><Field label="Overall rating"><input type="number" min="1" max="10" value={form.overall_rating || 5} onChange={e => update({ overall_rating: +e.target.value })} /></Field><Field label="Naturalness"><input type="number" min="1" max="10" value={form.naturalness_rating || 5} onChange={e => update({ naturalness_rating: +e.target.value })} /></Field><Field label="Root cause"><input value={form.root_cause_category || ''} onChange={e => update({ root_cause_category: e.target.value as any })} /></Field><Field label="Workflow node"><input value={form.workflow_node || ''} onChange={e => update({ workflow_node: e.target.value })} /></Field><Field label="Caller context"><textarea value={form.caller_context || ''} onChange={e => update({ caller_context: e.target.value })} /></Field><Field label="Summary"><textarea value={form.call_summary || ''} onChange={e => update({ call_summary: e.target.value })} /></Field><Field label="Breakpoint notes"><textarea value={form.breakpoint_notes || ''} onChange={e => update({ breakpoint_notes: e.target.value })} /></Field><Field label="Suggested improvement"><textarea value={form.suggested_improvement || ''} onChange={e => update({ suggested_improvement: e.target.value })} /></Field><Field label="Reviewer notes"><textarea value={form.reviewer_notes || ''} onChange={e => update({ reviewer_notes: e.target.value })} /></Field><Field label="Transcript"><textarea value={form.transcript || ''} onChange={e => update({ transcript: e.target.value })} /></Field></section>;
+  const duplicateIndex = useMemo(() => buildDuplicateIndex(scopeCalls), [scopeCalls]);
+
+  const filteredCalls = useMemo(() => {
+    return scopeCalls.filter(c => {
+      const ev = db.evidence.filter(e => e.call_id === c.id);
+      return (
+        callMatchesSearch(c, ev, q) &&
+        matchesCallerRequestFilter(c, requestFilter) &&
+        matchesResultFilter(c, resultFilter) &&
+        matchesMainIssueFilter(c, ev, mainIssueFilter) &&
+        matchesTriageFilter(c, ev, triageFilter) &&
+        matchesReviewStatusFilter(c, reviewStatusFilter) &&
+        matchesEvidenceTypeFilter(ev, evidenceTypeFilter)
+      );
+    });
+  }, [scopeCalls, db.evidence, q, requestFilter, resultFilter, mainIssueFilter, triageFilter, reviewStatusFilter, evidenceTypeFilter]);
+
+  const rows = useMemo(() => [...filteredCalls].sort(sortCallsForReview), [filteredCalls]);
+  const groups = useMemo(() => groupCalls(rows, db.evidence, groupBy), [rows, db.evidence, groupBy]);
+
+  const activeFilterCount = countActiveFilters({
+    q,
+    requestFilter,
+    resultFilter,
+    mainIssueFilter,
+    triageFilter,
+    reviewStatusFilter,
+    evidenceTypeFilter
+  });
+  const filtersActive = activeFilterCount > 0 || hasNonDefaultViewMode({ viewMode });
+
+  function clearFilters() {
+    setQ(DEFAULT_CALL_FILTERS.q);
+    setRequestFilter(DEFAULT_CALL_FILTERS.requestFilter);
+    setResultFilter(DEFAULT_CALL_FILTERS.resultFilter);
+    setMainIssueFilter(DEFAULT_CALL_FILTERS.mainIssueFilter);
+    setTriageFilter(DEFAULT_CALL_FILTERS.triageFilter);
+    setReviewStatusFilter(DEFAULT_CALL_FILTERS.reviewStatusFilter);
+    setEvidenceTypeFilter(DEFAULT_CALL_FILTERS.evidenceTypeFilter);
+    setViewMode(DEFAULT_CALL_FILTERS.viewMode);
+    setGroupBy(DEFAULT_CALL_FILTERS.groupBy);
+  }
+
+  function closeDetail() {
+    setDetail(null);
+    onClearSelection?.();
+  }
+
+  const activeCall = detail ? db.calls.find(c => c.id === detail.id) || detail : null;
+  const activeEvidence = activeCall ? db.evidence.filter(e => e.call_id === activeCall.id) : [];
+
+  if (activeCall) {
+    return (
+      <CallReviewShell
+        mode="page"
+        db={db}
+        setDb={setDb}
+        call={activeCall}
+        evidence={activeEvidence}
+        initialEvidenceId={selectedEvidenceId}
+        onClose={closeDetail}
+      />
+    );
+  }
+
+  const groupByLabel = groupBy === 'anliegen' ? 'Anliegen' : 'main issue';
+
+  return (
+    <main className="page calls-cockpit">
+      <div className="page-head">
+        <div>
+          <h1>Calls</h1>
+          <p className="muted">
+            Saved call library — grouped by {groupByLabel}.{' '}
+            <span className="badge blue">
+              Showing {workspaceLabel(workspace)} ({scopeCalls.length})
+            </span>
+            {rows.length !== scopeCalls.length && (
+              <span className="muted"> · {rows.length} after filters</span>
+            )}
+          </p>
+        </div>
+        <div className="row wrap workspace-toggle">
+          <button
+            type="button"
+            className={workspace === 'production' ? 'primary-soft' : ''}
+            onClick={() => setWorkspace('production')}
+          >
+            Production
+          </button>
+          <button
+            type="button"
+            className={workspace === 'test' ? 'primary-soft' : ''}
+            onClick={() => setWorkspace('test')}
+          >
+            Test
+          </button>
+        </div>
+      </div>
+
+      <section className="panel">
+        <CallFiltersBar
+          q={q}
+          setQ={setQ}
+          requestFilter={requestFilter}
+          setRequestFilter={setRequestFilter}
+          resultFilter={resultFilter}
+          setResultFilter={setResultFilter}
+          mainIssueFilter={mainIssueFilter}
+          setMainIssueFilter={setMainIssueFilter}
+          triageFilter={triageFilter}
+          setTriageFilter={setTriageFilter}
+          reviewStatusFilter={reviewStatusFilter}
+          setReviewStatusFilter={setReviewStatusFilter}
+          evidenceTypeFilter={evidenceTypeFilter}
+          setEvidenceTypeFilter={setEvidenceTypeFilter}
+          viewMode={viewMode}
+          setViewMode={setViewMode}
+          groupBy={groupBy}
+          setGroupBy={setGroupBy}
+          resultCount={rows.length}
+          activeFilterCount={activeFilterCount}
+          filtersActive={filtersActive}
+          onClearFilters={clearFilters}
+        />
+
+        {viewMode === 'grouped' ? (
+          <GroupedCallsView
+            groups={groups}
+            allEvidence={db.evidence}
+            onOpen={setDetail}
+            onPin={c => setDb(toggleCallFlag(db, c.id, 'pinned'))}
+            onDelete={c => setDeleteCallId(c.id)}
+          />
+        ) : (
+          <CallsTableView
+            rows={rows}
+            evidence={db.evidence}
+            duplicateIndex={duplicateIndex}
+            onOpen={setDetail}
+            onPin={c => setDb(toggleCallFlag(db, c.id, 'pinned'))}
+            onDelete={setDeleteCallId}
+          />
+        )}
+      </section>
+
+      {deleteCallId && (
+        <ConfirmDeleteModal
+          title="Delete call review?"
+          description="Permanently removes this call and all evidence from local storage."
+          onCancel={() => setDeleteCallId(null)}
+          onConfirm={async () => {
+            setDb(await deleteCallWithAudio(db, deleteCallId));
+            if (detail?.id === deleteCallId) closeDetail();
+            setDeleteCallId(null);
+          }}
+        />
+      )}
+    </main>
+  );
 }

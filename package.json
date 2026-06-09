@@ -1,5 +1,5 @@
 {
-  "name": "ai-call-qa-cockpit",
+  "name": "pflegemittelbox-qa",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,13 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "build:desktop": "npm run eval:reference && npm run build && env CARGO_TARGET_DIR=\"$PWD/src-tauri/target\" npm run tauri:build -- --bundles app && rm -rf \"$HOME/Desktop/Pflegemittelbox.app\" && cp -R \"$PWD/src-tauri/target/release/bundle/macos/Pflegemittelbox.app\" \"$HOME/Desktop/Pflegemittelbox.app\" && xattr -cr \"$HOME/Desktop/Pflegemittelbox.app\" && echo Done - open ~/Desktop/Pflegemittelbox.app",
+    "test:analysis": "npx vite-node src/analysis/runScenarios.ts",
+    "eval:reference": "npx vite-node scripts/evalReferenceCalls.ts",
+    "ui:explore": "node \"$HOME/.cursor/skills/ui-explore/scripts/ui-explore.mjs\"",
+    "ui:explore:full": "node \"$HOME/.cursor/skills/ui-explore/scripts/ui-explore.mjs\" --open-call --seed-demo",
+    "ui:export-seed": "npx vite-node scripts/ui-export-seed.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "latest",
@@ -20,6 +26,7 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "@vitejs/plugin-react": "latest",
+    "playwright": "^1.52.0",
     "typescript": "latest",
     "vite": "latest"
   }

@@ -1,0 +1,8 @@
+Agent: Guten Tag.
+Caller: Ich möchte die Pflegebox kündigen.
+Agent: Versicherungsnummer?
+Caller: D444555666
+Agent: Geburtsdatum?
+Caller: 20.07.1948
+Agent: Die Kündigung wurde vorgenommen.
+Caller: Danke.

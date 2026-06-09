@@ -1,0 +1,8 @@
+Agent: Guten Tag, wie kann ich helfen?
+Caller: Ich möchte die Produkte in der Pflegebox ändern — Handschuhe und Desinfektionsmittel.
+Agent: Gerne. Bitte nennen Sie die Versicherungsnummer.
+Caller: A123456789
+Agent: Danke. Und das Geburtsdatum?
+Caller: 31.01.1934
+Agent: Die Änderung wurde vorgenommen. Sie erhalten die angepasste Box.
+Caller: Danke, auf Wiederhören.

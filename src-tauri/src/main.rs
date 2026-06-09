@@ -1,1 +1,3 @@
-fn main() { ai_call_qa_cockpit_lib::run() }
+fn main() {
+    pflegemittelbox_qa_lib::run()
+}

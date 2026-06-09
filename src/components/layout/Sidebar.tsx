@@ -1,4 +1,45 @@
-import { BarChart3, Bot, Brain, ClipboardList, FlaskConical, Menu, Mic, Settings, ShieldAlert, Users } from 'lucide-react';
-export type PageKey = 'dashboard'|'calls'|'issues'|'experiments'|'insights'|'meeting'|'memory'|'settings';
-const items = [ ['dashboard','Dashboard',BarChart3], ['calls','Call Reviews',Mic], ['issues','Issues',ShieldAlert], ['experiments','Experiments',FlaskConical], ['insights','AI Insights',Bot], ['meeting','Meeting Prep',Users], ['memory','Memory',Brain], ['settings','Settings',Settings] ] as const;
-export function Sidebar({ page, setPage, collapsed, setCollapsed }: { page:PageKey; setPage:(p:PageKey)=>void; collapsed:boolean; setCollapsed:(v:boolean)=>void }) { return <aside className={'sidebar '+(collapsed?'collapsed':'')}><button className="nav-toggle" onClick={()=>setCollapsed(!collapsed)}><Menu size={18}/>{!collapsed && <span>AI Call QA</span>}</button><nav>{items.map(([key,label,Icon])=><button key={key} className={page===key?'active':''} onClick={()=>setPage(key as PageKey)} title={label}><Icon size={18}/>{!collapsed && <span>{label}</span>}</button>)}</nav><div className="side-foot">{!collapsed && 'Local-first QA cockpit'}</div></aside>; }
+import { Inbox, Menu, Mic, Settings, ShieldAlert } from 'lucide-react';
+
+export type PageKey = 'inbox' | 'calls' | 'issues' | 'settings';
+
+const items = [
+  ['inbox', 'Inbox', Inbox],
+  ['calls', 'Calls', Mic],
+  ['issues', 'Issues', ShieldAlert],
+  ['settings', 'Settings', Settings]
+] as const;
+
+export function Sidebar({
+  page,
+  setPage,
+  collapsed,
+  setCollapsed
+}: {
+  page: PageKey;
+  setPage: (p: PageKey) => void;
+  collapsed: boolean;
+  setCollapsed: (v: boolean) => void;
+}) {
+  return (
+    <aside className={'sidebar ' + (collapsed ? 'collapsed' : '')}>
+      <button className="nav-toggle" onClick={() => setCollapsed(!collapsed)}>
+        <Menu size={18} />
+        {!collapsed && <span>Pflegemittelbox</span>}
+      </button>
+      <nav>
+        {items.map(([key, label, Icon]) => (
+          <button
+            key={key}
+            className={page === key ? 'active' : ''}
+            onClick={() => setPage(key as PageKey)}
+            title={label}
+          >
+            <Icon size={18} />
+            {!collapsed && <span>{label}</span>}
+          </button>
+        ))}
+      </nav>
+      <div className="side-foot">{!collapsed && 'Marie QA cockpit'}</div>
+    </aside>
+  );
+}

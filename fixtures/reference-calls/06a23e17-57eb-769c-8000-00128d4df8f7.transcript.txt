@@ -1,0 +1,8 @@
+Agent: Guten Tag.
+Caller: Ich habe eine allgemeine Frage zu den Leistungen.
+Agent: Versicherungsnummer bitte.
+Caller: B987654321
+Agent: Geburtsdatum?
+Caller: 15.03.1940
+Agent: Wie kann ich Ihnen weiterhelfen?
+Caller: Nur eine Information, danke.

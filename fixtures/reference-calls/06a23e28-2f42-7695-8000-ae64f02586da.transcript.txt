@@ -1,0 +1,8 @@
+Agent: Guten Tag.
+Caller: Ich möchte wissen wann mein Paket kommt.
+Agent: Versicherungsnummer bitte.
+Caller: C111222333
+Agent: Geburtsdatum?
+Caller: 01.05.1955
+Agent: Ihre Sendung ist unterwegs.
+Caller: Super, danke.

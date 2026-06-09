@@ -1,5 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+.cursor/ui-captures/
 .DS_Store
 *.log
+.env
