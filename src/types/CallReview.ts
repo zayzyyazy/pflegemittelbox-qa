@@ -1,3 +1,5 @@
+import type { ReviewObject } from './ReviewObject';
+
 export type AnliegenCategory =
   | 'box_or_product_change'
   | 'order_status'
@@ -9,6 +11,15 @@ export type AnliegenCategory =
   | 'other';
 
 export type SolvedStatus = 'yes' | 'partially' | 'no';
+export type MarieCallStatus = 'completed' | 'dropped' | 'transferred' | 'failed' | 'unknown';
+export type MarieMainResult =
+  | 'solved_by_marie'
+  | 'transferred'
+  | 'ticket_created'
+  | 'email_sent'
+  | 'update_performed'
+  | 'unresolved'
+  | 'unknown';
 
 export type MainIssueLabel =
   | 'Authentication failure'
@@ -40,6 +51,13 @@ export interface TranscriptSegment {
   end: number;
   text: string;
   speaker?: 'caller' | 'agent' | 'unknown';
+  words?: TranscriptWord[];
+}
+
+export interface TranscriptWord {
+  start: number;
+  end: number;
+  word: string;
 }
 
 export interface CallReview {
@@ -73,9 +91,13 @@ export interface CallReview {
   call_summary: string;
   original_intent_summary?: string;
   final_outcome?: string;
+  marie_call_status?: MarieCallStatus;
+  marie_main_result?: MarieMainResult;
   secondary_issues?: string[];
   transcript: string;
   transcript_segments?: TranscriptSegment[];
+  transcript_words?: TranscriptWord[];
+  transcription_model?: string;
   audio_file_name: string;
   audio_file_size: number;
   audio_file_type: string;
@@ -83,6 +105,16 @@ export interface CallReview {
   audio_original_path?: string;
   audio_local_path?: string;
   audio_storage_key?: string;
+  recording_url?: string;
+  leaping_call_id?: string;
+  leaping_detail_url?: string;
+  leaping_snapshot_id?: string;
+  leaping_status?: string;
+  leaping_raw_id?: string;
+  leaping_transcript_events?: unknown[];
+  function_calls?: MarieFunctionCall[];
+  transitions?: MarieTransition[];
+  raw_metadata?: Record<string, unknown>;
   imported_at?: string;
   import_batch_id?: string;
   review_status?: 'new' | 'reviewed' | 'flagged';
@@ -91,6 +123,8 @@ export interface CallReview {
   customer_name?: string;
   vnr?: string;
   phone?: string;
+  email?: string;
+  birthday?: string;
   analysis_version?: number;
   linked_issue_ids: string[];
   /** Reviewer triage */
@@ -107,6 +141,7 @@ export interface CallReview {
   sub_tags?: string[];
   conversational_quality?: number;
   operational_reliability?: number;
+  review_object?: ReviewObject;
   pin_note?: string;
   pin_experiment_id?: string;
   crm_checked?: boolean;
@@ -114,4 +149,20 @@ export interface CallReview {
   locked_fields?: string[];
   created_at: string;
   updated_at: string;
+}
+
+export interface MarieFunctionCall {
+  name: string;
+  status?: 'success' | 'error' | 'unknown';
+  arguments?: Record<string, unknown>;
+  result?: unknown;
+  timestamp_seconds?: number;
+}
+
+export interface MarieTransition {
+  from?: string;
+  to?: string;
+  node?: string;
+  timestamp_seconds?: number;
+  label?: string;
 }

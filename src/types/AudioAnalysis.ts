@@ -23,10 +23,12 @@ export interface TimingSignal {
 export interface AudioListenerFinding {
   heard: string;
   issue_type: string;
+  speaker?: 'caller' | 'agent' | 'unknown';
   severity: 'low' | 'medium' | 'high';
   start_seconds?: number;
   end_seconds?: number;
   confidence: number;
+  suggested_action?: string;
 }
 
 export interface AudioClipWindow {

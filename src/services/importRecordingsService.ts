@@ -77,6 +77,8 @@ export async function processDraftRecording(
         ...working.drafts!.find(d => d.id === draftId)!.call,
         transcript: transcribed.text,
         transcript_segments: transcribed.segments,
+        transcript_words: transcribed.words,
+        transcription_model: transcribed.transcription_model,
         duration_seconds: transcribed.duration_seconds
       },
       processing_step: 'Listening locally'
@@ -104,9 +106,14 @@ export async function processDraftRecording(
       call_id: call.call_id || cleanCallIdFromFilename(file.name),
       transcript: transcribed.text,
       transcript_segments: transcribed.segments,
+      transcript_words: transcribed.words,
+      transcription_model: transcribed.transcription_model,
       workspace: opts?.workspace || call.workspace || 'production',
       bot_version: opts?.botVersion || call.bot_version || 'production'
     };
+    if (import.meta.env.DEV && mergedCall.review_object) {
+      console.info('[review_object]', mergedCall.call_id, mergedCall.review_object);
+    }
 
     const dup = findDuplicate(mergedCall as any, working.calls);
 

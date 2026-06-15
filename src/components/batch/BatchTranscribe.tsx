@@ -90,7 +90,11 @@ export function BatchTranscribe({ db, setDb }: { db: Database; setDb: (db: Datab
         ...call,
         ...audioFields,
         id: callId,
-        call_id: call.call_id || cleanCallIdFromFilename(row.file.name)
+        call_id: call.call_id || cleanCallIdFromFilename(row.file.name),
+        transcript: transcribed.text,
+        transcript_segments: transcribed.segments,
+        transcript_words: transcribed.words,
+        transcription_model: transcribed.transcription_model
       };
       const dup = findDuplicate(mergedCall as CallReview, dbRef.current.calls);
 

@@ -20,9 +20,12 @@ import { nowIso } from '../../utils/dates';
 import { resolveEvidenceForSave } from '../../utils/evidenceReview';
 import { inferEvidenceMetadata } from '../../utils/inferEvidence';
 import type { mergeSegmentSelection } from '../../utils/transcriptContext';
+import { buildReviewObject } from '../../utils/reviewObject';
+import { safeStringify } from '../../utils/safeJson';
 import { CallAudioPlayer } from './CallAudioPlayer';
 import { TranscriptReviewPanel } from './TranscriptReviewPanel';
 import { TranscriptSelectionToolbar } from './TranscriptSelectionToolbar';
+import { LeapingTranscriptEvents } from './LeapingTranscriptEvents';
 import { ConfirmDeleteModal } from '../ui/ConfirmDeleteModal';
 import { FindingsStrip } from './FindingsStrip';
 import { FlagIssueModal } from './FlagIssueModal';
@@ -102,6 +105,7 @@ export function CallReviewShell({
     savedCall?.audio_local_path ||
     savedCall?.audio_storage_key
   );
+  const reviewObject = call.review_object || savedCall?.review_object;
 
   const update = (patch: Partial<CallReview>) => setCall(c => ({ ...c, ...patch }));
 
@@ -242,6 +246,27 @@ export function CallReviewShell({
     onClose();
   }
 
+  function generateDebugReviewObject() {
+    const nextReviewObject = buildReviewObject({
+      call,
+      evidence
+    });
+    update({ review_object: nextReviewObject });
+    if (savedCall) {
+      setDb(
+        upsertCall(db, {
+          ...savedCall,
+          ...call,
+          review_object: nextReviewObject,
+          updated_at: nowIso()
+        } as CallReview)
+      );
+    }
+    if (import.meta.env.DEV) {
+      console.info('[review_object:debug]', call.call_id || call.id, nextReviewObject);
+    }
+  }
+
   function handleIssueLinked(issueId: string) {
     const linked = Array.from(new Set([...(call.linked_issue_ids || []), issueId]));
     update({ linked_issue_ids: linked, review_status: 'flagged' });
@@ -334,11 +359,22 @@ export function CallReviewShell({
       <div className="call-review-grid">
         <div className="call-review-main">
           <CallAudioPlayer call={call} seekSeconds={seekSeconds} />
+          {call.recording_url && (
+            <div className="audio-heard-panel">
+              <a className="buttonlike btn-sm" href={call.recording_url} target="_blank" rel="noreferrer">
+                Open Leaping recording
+              </a>
+              <p className="muted">Leaping recording URL may require Leaping authentication.</p>
+            </div>
+          )}
 
-          {(call.customer_name || call.vnr) && (
+          {(call.customer_name || call.vnr || call.phone || call.email || call.birthday) && (
             <div className="call-meta-row row wrap">
               {call.customer_name && <span className="badge gray">Kunde: {call.customer_name}</span>}
               {call.vnr && <span className="badge gray">VNR: {call.vnr}</span>}
+              {call.phone && <span className="badge gray">Phone: {call.phone}</span>}
+              {call.email && <span className="badge gray">Email: {call.email}</span>}
+              {call.birthday && <span className="badge gray">Birthday: {call.birthday}</span>}
             </div>
           )}
 
@@ -430,6 +466,79 @@ export function CallReviewShell({
                   <option value="experimental">experimental</option>
                 </select>
               </Field>
+              {(call.leaping_call_id || call.function_calls?.length || call.transitions?.length || call.raw_metadata) && (
+                <div className="debug-review-object">
+                  <div className="row between wrap">
+                    <div>
+                      <strong>Leaping data</strong>
+                      <p className="muted">
+                        {[
+                          call.marie_call_status || call.leaping_status,
+                          call.marie_main_result,
+                          call.leaping_snapshot_id && `snapshot ${call.leaping_snapshot_id}`
+                        ].filter(Boolean).join(' · ') || 'Imported Leaping payload'}
+                      </p>
+                    </div>
+                    <div className="row wrap">
+                      {call.recording_url && <a className="buttonlike btn-sm" href={call.recording_url} target="_blank" rel="noreferrer">Recording</a>}
+                      {call.leaping_detail_url && <a className="buttonlike btn-sm" href={call.leaping_detail_url} target="_blank" rel="noreferrer">Leaping detail</a>}
+                    </div>
+                  </div>
+                  <pre className="debug-json">
+                    {safeStringify(
+                      {
+                        leaping_call_id: call.leaping_call_id,
+                        customer: {
+                          phone: call.phone,
+                          name: call.customer_name,
+                          vnr: call.vnr,
+                          email: call.email,
+                          birthday: call.birthday
+                        },
+                        function_calls: call.function_calls,
+                        transitions: call.transitions,
+                        raw_metadata: call.raw_metadata
+                      }
+                    )}
+                  </pre>
+                  <LeapingTranscriptEvents events={call.leaping_transcript_events} />
+                </div>
+              )}
+              <div className="debug-review-object">
+                <div className="row between wrap">
+                  <div>
+                    <strong>Review object</strong>
+                    <p className="muted">
+                      {reviewObject
+                        ? `${reviewObject.candidate_findings.length} candidates · ${reviewObject.verified_findings.length} verified · ${reviewObject.action_items.length} actions`
+                        : 'Not generated for this call yet.'}
+                    </p>
+                  </div>
+                  <button type="button" className="btn-sm" onClick={generateDebugReviewObject}>
+                    Generate debug object
+                  </button>
+                </div>
+                {reviewObject && (
+                  <pre className="debug-json">
+                    {safeStringify(
+                      {
+                        status: reviewObject.pipeline_status,
+                        agents: Object.fromEntries(
+                          Object.entries(reviewObject.agents).map(([key, value]) => [
+                            key,
+                            {
+                              status: value.status,
+                              findings: value.findings.length,
+                              confidence: value.confidence
+                            }
+                          ])
+                        ),
+                        dashboard_signals: reviewObject.dashboard_signals
+                      }
+                    )}
+                  </pre>
+                )}
+              </div>
             </section>
           )}
         </div>

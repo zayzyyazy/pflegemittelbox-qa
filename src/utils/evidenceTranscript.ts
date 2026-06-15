@@ -36,3 +36,59 @@ export function evidenceBySegment(segment: TranscriptSegment, evidence: Evidence
 export function segmentsForEvidence(evidence: EvidenceMoment, segments: TranscriptSegment[]) {
   return segments.filter(s => evidenceMatchesSegment(evidence, s));
 }
+
+function overlapWords(a: string, b: string) {
+  const aw = new Set(norm(a).split(' ').filter(w => w.length > 3));
+  const bw = norm(b).split(' ').filter(w => w.length > 3);
+  if (!aw.size || !bw.length) return 0;
+  const hits = bw.filter(w => aw.has(w)).length;
+  return hits / Math.max(aw.size, bw.length);
+}
+
+function closestSegmentByTime(start: number | undefined, segments: TranscriptSegment[]) {
+  if (start == null || !Number.isFinite(start)) return undefined;
+  return [...segments].sort((a, b) => {
+    const da = Math.min(Math.abs(start - a.start), Math.abs(start - a.end));
+    const db = Math.min(Math.abs(start - b.start), Math.abs(start - b.end));
+    return da - db;
+  })[0];
+}
+
+function bestSegmentByQuote(quote: string, segments: TranscriptSegment[]) {
+  if (!quote.trim()) return undefined;
+  return [...segments]
+    .map(segment => ({ segment, score: overlapWords(segment.text, quote) }))
+    .filter(row => row.score >= 0.28)
+    .sort((a, b) => b.score - a.score)[0]?.segment;
+}
+
+export function groundEvidenceToSegments<T extends Partial<EvidenceMoment>>(
+  evidence: T,
+  segments?: TranscriptSegment[]
+): T {
+  if (!segments?.length) return evidence;
+  const direct = segments.filter(segment => evidenceMatchesSegment(evidence as EvidenceMoment, segment));
+  const fallback =
+    direct.length ? undefined :
+      bestSegmentByQuote(String(evidence.quote_or_transcript_excerpt || ''), segments) ||
+      closestSegmentByTime(evidence.timestamp_start_seconds, segments);
+  const matched = direct.length ? direct : fallback ? [fallback] : [];
+  if (!matched.length) return evidence;
+
+  const start = matched[0].start;
+  const end = matched[matched.length - 1].end;
+  const quote = evidence.quote_or_transcript_excerpt?.trim() || matched.map(s => s.text).join(' ').slice(0, 280);
+  const speaker =
+    evidence.speaker && evidence.speaker !== 'unknown'
+      ? evidence.speaker
+      : matched.find(s => s.speaker === 'caller' || s.speaker === 'agent')?.speaker || evidence.speaker;
+
+  return {
+    ...evidence,
+    timestamp_start_seconds: evidence.timestamp_start_seconds || start,
+    timestamp_end_seconds: evidence.timestamp_end_seconds || end,
+    segment_starts: evidence.segment_starts?.length ? evidence.segment_starts : matched.map(s => s.start),
+    quote_or_transcript_excerpt: quote,
+    speaker
+  };
+}

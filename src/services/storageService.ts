@@ -8,6 +8,9 @@ import type { PatternThread } from '../types/PatternThread';
 import type { DraftCall } from '../types/DraftCall';
 import type { Taxonomy } from '../types/Taxonomy';
 import { defaultTaxonomy } from '../types/Taxonomy';
+import type { PersonalTask } from '../types/PersonalTask';
+import type { WorkspaceNote } from '../types/WorkspaceNote';
+import type { LeapingRawCall } from '../types/Leaping';
 import { finalizeDatabaseState } from './issuePatternService';
 import { nowIso } from '../utils/dates';
 import { computeRatings, resolveCallerRequest, resolveSolvedStatus, syncCallFlagsFromEvidence } from '../utils/callAnalysis';
@@ -22,6 +25,7 @@ function isValidSolvedStatus(value: unknown): value is SolvedStatus {
 
 export type AnalysisStrictness = 'standard' | 'strict' | 'lenient';
 export type EvidenceSensitivity = 'low' | 'medium' | 'high';
+export type AudioListenerMode = 'all' | 'suspicious';
 
 export interface Settings {
   openaiApiKey: string;
@@ -31,10 +35,19 @@ export interface Settings {
   analysisStrictness: AnalysisStrictness;
   evidenceSensitivity: EvidenceSensitivity;
   audioListenerEnabled: boolean;
+  audioListenerMode: AudioListenerMode;
   audioListenerModel: string;
   maxAudioClipsPerCall: number;
   maxClipSeconds: number;
   alwaysListenFullCallUnderSeconds: number;
+  leapingApiUrl: string;
+  leapingLoginUrl: string;
+  leapingUsername: string;
+  leapingPassword: string;
+  leapingApiKey: string;
+  leapingAccessToken?: string;
+  leapingRefreshToken?: string;
+  leapingTokenExpiresAt?: string;
   dbRecoveryNotice?: string;
 }
 
@@ -48,6 +61,11 @@ export interface Database {
   patternThreads?: PatternThread[];
   drafts?: DraftCall[];
   taxonomy?: Taxonomy;
+  personalTasks?: PersonalTask[];
+  personalNotes?: { id: string; text: string; created_at: string; updated_at: string }[];
+  workspaceNotes?: WorkspaceNote[];
+  leapingRawCalls?: LeapingRawCall[];
+  leapingLastImportAt?: string;
   settings: Settings;
   seeded: boolean;
 }
@@ -64,10 +82,16 @@ export const defaultSettings: Settings = {
   analysisStrictness: 'strict',
   evidenceSensitivity: 'low',
   audioListenerEnabled: true,
+  audioListenerMode: 'all',
   audioListenerModel: 'gpt-audio-1.5',
   maxAudioClipsPerCall: 2,
   maxClipSeconds: 30,
-  alwaysListenFullCallUnderSeconds: 180
+  alwaysListenFullCallUnderSeconds: 1200,
+  leapingApiUrl: '',
+  leapingLoginUrl: 'https://api.leaping.ai/v1/auth/login',
+  leapingUsername: '',
+  leapingPassword: '',
+  leapingApiKey: ''
 };
 
 function emptyDatabase(): Database {
@@ -81,6 +105,10 @@ function emptyDatabase(): Database {
     patternThreads: [],
     drafts: [],
     taxonomy: defaultTaxonomy,
+    personalTasks: [],
+    personalNotes: [],
+    workspaceNotes: [],
+    leapingRawCalls: [],
     settings: defaultSettings,
     seeded: false
   };
@@ -123,6 +151,10 @@ export function seedDatabase(): Database {
     patternThreads: [],
     drafts: [],
     taxonomy: defaultTaxonomy,
+    personalTasks: [],
+    personalNotes: [],
+    workspaceNotes: [],
+    leapingRawCalls: [],
     settings: defaultSettings,
     seeded: true
   };
@@ -137,7 +169,12 @@ export function migrateDatabase(parsed: Partial<Database>): Database {
     taxonomy: parsed.taxonomy || defaultTaxonomy,
     patternThreads: parsed.patternThreads || [],
     drafts: parsed.drafts || [],
-    insights: parsed.insights || []
+    insights: parsed.insights || [],
+    personalTasks: parsed.personalTasks || [],
+    personalNotes: parsed.personalNotes || [],
+    workspaceNotes: parsed.workspaceNotes || [],
+    leapingRawCalls: parsed.leapingRawCalls || [],
+    leapingLastImportAt: parsed.leapingLastImportAt
   };
   db.calls = (parsed.calls || seed.calls).map(raw => {
     const call = {
@@ -254,7 +291,7 @@ function pruneCalls(db: Database, keep: (c: CallReview) => boolean): Database {
 }
 
 export const clearProductionCalls = (db: Database) =>
-  pruneCalls(db, c => callWorkspace(c) === 'test');
+  pruneCalls(db, c => callWorkspace(c) === 'production');
 
 export const clearTestCalls = (db: Database) =>
-  pruneCalls(db, c => callWorkspace(c) === 'production');
+  pruneCalls(db, c => callWorkspace(c) === 'test');

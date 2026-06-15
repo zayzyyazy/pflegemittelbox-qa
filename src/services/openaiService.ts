@@ -18,6 +18,7 @@ import { filterEvidenceList } from '../analysis/callUnderstanding';
 import { extractCallEvidence } from '../engine/extractCall';
 import { cleanCallIdFromFilename, id } from '../utils/text';
 import { nowIso } from '../utils/dates';
+import { groundEvidenceToSegments } from '../utils/evidenceTranscript';
 
 const timeoutSignal = (ms: number) => {
   const c = new AbortController();
@@ -68,10 +69,15 @@ export async function transcribeAudio(settings: Settings, file: File) {
 
 export async function transcribeAudioDetailed(settings: Settings, file: File) {
   requireKey(settings);
+  const model = settings.transcriptionModel || 'whisper-1';
   const form = new FormData();
-  form.append('model', settings.transcriptionModel || 'whisper-1');
+  form.append('model', model);
   form.append('response_format', 'verbose_json');
   form.append('file', file);
+  if (model === 'whisper-1') {
+    form.append('timestamp_granularities[]', 'segment');
+    form.append('timestamp_granularities[]', 'word');
+  }
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     signal: timeoutSignal(180000),
@@ -80,46 +86,66 @@ export async function transcribeAudioDetailed(settings: Settings, file: File) {
   });
   if (!res.ok) throw new Error((await res.text()).slice(0, 300) || 'Transcription failed');
   const json = await res.json();
+  const words = (json.words || []).map((word: { start?: number; end?: number; word?: string }) => ({
+    start: Number(word.start || 0),
+    end: Number(word.end || word.start || 0),
+    word: String(word.word || '').trim()
+  })).filter((word: { word: string }) => word.word);
   return {
     text: json.text || '',
     duration_seconds: typeof json.duration === 'number' ? Math.round(json.duration) : undefined,
-    segments: (json.segments || []).map((segment: { start?: number; end?: number; text?: string }) => ({
-      start: Number(segment.start || 0),
-      end: Number(segment.end || segment.start || 0),
-      text: String(segment.text || '').trim(),
-      speaker: 'unknown' as const
-    })).filter((segment: TranscriptSegment) => segment.text)
+    transcription_model: model,
+    words,
+    segments: (json.segments || []).map((segment: { start?: number; end?: number; text?: string; speaker?: string }) => {
+      const start = Number(segment.start || 0);
+      const end = Number(segment.end || segment.start || 0);
+      return {
+        start,
+        end,
+        text: String(segment.text || '').trim(),
+        speaker: segment.speaker === 'caller' || segment.speaker === 'agent' ? segment.speaker : 'unknown' as const,
+        words: words.filter((word: { start: number }) => word.start >= start && word.start <= end)
+      };
+    }).filter((segment: TranscriptSegment) => segment.text)
   };
 }
 
-function buildEvidenceRows(callId: string, raw: Partial<EvidenceMoment>[], now: string): EvidenceMoment[] {
-  return raw.map(e => ({
-    id: id('ev'),
-    call_id: callId,
-    speaker: e.speaker || 'unknown',
-    moment_type: (e.moment_type || 'other') as EvidenceMomentType,
-    severity: e.severity === 'high' || e.severity === 'low' ? e.severity : 'medium',
-    timestamp_start_seconds: Number(e.timestamp_start_seconds || 0),
-    timestamp_end_seconds: Number(e.timestamp_end_seconds || 0),
-    quote_or_transcript_excerpt: (e.quote_or_transcript_excerpt || '').slice(0, 280),
-    explanation: e.explanation || '',
-    recommended_fix: e.recommended_fix || '',
-    voice_cue_notes: e.voice_cue_notes || '',
-    confidence: e.confidence,
-    linked_issue_suggestion: e.linked_issue_suggestion,
-    source: (e.source === 'ai_suggested'
-      ? 'ai_suggested'
-      : e.source === 'audio_listener'
-        ? 'audio_listener'
-        : 'ai') as EvidenceMoment['source'],
-    reviewer_status: 'pending' as const,
-    reviewer_label: e.reviewer_label,
-    reviewer_note: e.reviewer_note,
-    segment_starts: e.segment_starts,
-    pinned: e.pinned,
-    created_at: now,
-    updated_at: now
-  }));
+function buildEvidenceRows(
+  callId: string,
+  raw: Partial<EvidenceMoment>[],
+  now: string,
+  segments?: TranscriptSegment[]
+): EvidenceMoment[] {
+  return raw.map(e => {
+    const grounded = groundEvidenceToSegments(e, segments);
+    return {
+      id: id('ev'),
+      call_id: callId,
+      speaker: grounded.speaker || 'unknown',
+      moment_type: (grounded.moment_type || 'other') as EvidenceMomentType,
+      severity: grounded.severity === 'high' || grounded.severity === 'low' ? grounded.severity : 'medium',
+      timestamp_start_seconds: Number(grounded.timestamp_start_seconds || 0),
+      timestamp_end_seconds: Number(grounded.timestamp_end_seconds || 0),
+      quote_or_transcript_excerpt: (grounded.quote_or_transcript_excerpt || '').slice(0, 280),
+      explanation: grounded.explanation || '',
+      recommended_fix: grounded.recommended_fix || '',
+      voice_cue_notes: grounded.voice_cue_notes || '',
+      confidence: grounded.confidence,
+      linked_issue_suggestion: grounded.linked_issue_suggestion,
+      source: (grounded.source === 'ai_suggested'
+        ? 'ai_suggested'
+        : grounded.source === 'audio_listener'
+          ? 'audio_listener'
+          : 'ai') as EvidenceMoment['source'],
+      reviewer_status: 'pending' as const,
+      reviewer_label: grounded.reviewer_label,
+      reviewer_note: grounded.reviewer_note,
+      segment_starts: grounded.segment_starts,
+      pinned: grounded.pinned,
+      created_at: now,
+      updated_at: now
+    };
+  });
 }
 
 function capRiskHints(raw: string, maxLines = 2): string {
@@ -200,7 +226,7 @@ export function buildCallFromAiOutput(
   };
 
   call = syncCallFlagsFromEvidence(call, [], understanding);
-  const evidence = buildEvidenceRows(callId, sanitized, now);
+  const evidence = buildEvidenceRows(callId, sanitized, now, input.transcriptSegments);
   call = syncCallFlagsFromEvidence(call, evidence, understanding);
   call.reviewer_notes = buildReviewerNotes(
     { ...call, primary_issue_label: mainIssue || call.primary_issue_label },
