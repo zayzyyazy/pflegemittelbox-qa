@@ -137,15 +137,26 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <label className="field">
-          <span>Login endpoint URL</span>
+          <span>Login endpoint URL (Supabase Auth)</span>
           <input
             value={settings.leapingLoginUrl || ''}
             onChange={e => patch({ leapingLoginUrl: e.target.value })}
-            placeholder="https://api.leaping.ai/v1/auth/login"
+            placeholder="https://YOUR-PROJECT.supabase.co/auth/v1/token?grant_type=password"
           />
         </label>
         <label className="field">
-          <span>Username / email</span>
+          <span>Supabase anon API key</span>
+          <input
+            type="password"
+            value={settings.leapingSupabaseAnonKey || ''}
+            onChange={e => patch({ leapingSupabaseAnonKey: e.target.value })}
+            placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+            autoComplete="off"
+          />
+          <span className="muted">Required for Leaping Supabase login — sent as apikey + Authorization headers.</span>
+        </label>
+        <label className="field">
+          <span>Email</span>
           <input
             type="email"
             value={settings.leapingUsername || ''}
@@ -226,9 +237,8 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <p className="muted privacy">
-          All credentials stored in browser localStorage — local only.
-          The app logs in automatically using username/password and caches the token for 24 hours.
-          The manual Bearer token above is used only if login credentials are not set.
+          Leaping uses Supabase Auth. Email + password + anon key are sent to your login endpoint.
+          Tokens (access + refresh + expiry) are cached locally. Manual Bearer token below still works as fallback.
         </p>
       </section>
 
