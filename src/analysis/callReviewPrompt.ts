@@ -43,6 +43,12 @@ Otherwise pick one verify-process label when applicable.
 
 ## evidence_moments — verify-process focus (0–5 max)
 
+When transcript_segments are provided, use them as the evidence source:
+- set timestamp_start_seconds / timestamp_end_seconds from the exact segment(s)
+- copy transcript_excerpt verbatim from those segment(s)
+- do not invent timestamps, quotes, or speaker labels
+- if a finding is plausible but not grounded in a segment, lower confidence to medium
+
 Prioritize these moment_type values in order:
 1. caller_cut_off — caller interrupted or cut off mid-request (Unterbrechung)
 2. repeated_authentication — same auth field asked again after caller already answered

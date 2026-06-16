@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Sidebar, type PageKey } from '../components/layout/Sidebar';
+import { DashboardPage } from '../pages/DashboardPage';
 import { InboxPage } from '../pages/InboxPage';
 import { CallsPage } from '../pages/CallsPage';
 import { IssuesPage } from '../pages/IssuesPage';
+import { NotesPage } from '../pages/NotesPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import { loadDb, saveDb, type Database } from '../services/storageService';
 import type { CallReview } from '../types/CallReview';
 import { loadSavedWorkspace, saveWorkspace, workspaceLabel } from '../utils/workspace';
+import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 
 export default function App() {
-  const [page, setPage] = useState<PageKey>('inbox');
+  const [page, setPage] = useState<PageKey>('dashboard');
   const [collapsed, setCollapsed] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<string | undefined>();
   const [selectedCall, setSelectedCall] = useState<string | undefined>();
@@ -19,10 +22,12 @@ export default function App() {
   const [db, setDbState] = useState<Database>(() => loadDb());
   const setDb = (next: Database) => {
     setDbState(next);
-    saveDb(next);
+    try {
+      saveDb(next);
+    } catch (e) {
+      console.error('[pflegemittelbox] saveDb failed — storage quota may be exceeded', e);
+    }
   };
-
-  useEffect(() => saveDb(db), [db]);
 
   useEffect(() => {
     if (!toast) return;
@@ -56,6 +61,16 @@ export default function App() {
     <div className="app">
       <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
       <div className="content">
+        <ErrorBoundary name={`route:${page}`}>
+        {page === 'dashboard' && (
+          <DashboardPage
+            db={db}
+            setDb={setDb}
+            openInbox={() => setPage('inbox')}
+            openIssue={openIssue}
+            openCall={id => openCall(id)}
+          />
+        )}
         {page === 'inbox' && (
           <InboxPage
             db={db}
@@ -88,7 +103,9 @@ export default function App() {
             openCall={openCall}
           />
         )}
+        {page === 'notes' && <NotesPage db={db} setDb={setDb} openCall={openCall} />}
         {page === 'settings' && <SettingsPage db={db} setDb={setDb} />}
+        </ErrorBoundary>
       </div>
       {toast && (
         <div className="app-toast" role="status">

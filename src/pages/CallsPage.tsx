@@ -22,6 +22,7 @@ import {
 import { groupCalls } from '../utils/callGrouping';
 import { toggleCallFlag } from '../services/callTriageService';
 import { deleteCallWithAudio } from '../services/callsService';
+import { fetchLeapingCalls, importLeapingRawCalls } from '../services/leapingImportService';
 import { ConfirmDeleteModal } from '../components/ui/ConfirmDeleteModal';
 import { buildDuplicateIndex } from '../services/duplicateService';
 import { CallReviewShell } from '../components/calls/CallReviewShell';
@@ -29,6 +30,7 @@ import { CallFiltersBar } from '../components/calls/CallFiltersBar';
 import { GroupedCallsView } from '../components/calls/GroupedCallsView';
 import { CallsTableView } from '../components/calls/CallsTableView';
 import { callWorkspace, loadSavedWorkspace, saveWorkspace, workspaceLabel } from '../utils/workspace';
+import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 
 export function CallsPage({
   db,
@@ -69,6 +71,8 @@ export function CallsPage({
   const [viewMode, setViewMode] = useState<'grouped' | 'table'>(saved.viewMode || 'grouped');
   const [groupBy, setGroupBy] = useState<GroupByMode>(saved.groupBy || 'anliegen');
   const [deleteCallId, setDeleteCallId] = useState<string | null>(null);
+  const [importingLeaping, setImportingLeaping] = useState(false);
+  const [leapingMsg, setLeapingMsg] = useState('');
 
   useEffect(() => {
     if (selectedCallId) setDetail(db.calls.find(c => c.id === selectedCallId) || null);
@@ -146,19 +150,62 @@ export function CallsPage({
 
   if (activeCall) {
     return (
-      <CallReviewShell
-        mode="page"
-        db={db}
-        setDb={setDb}
-        call={activeCall}
-        evidence={activeEvidence}
-        initialEvidenceId={selectedEvidenceId}
-        onClose={closeDetail}
-      />
+      <ErrorBoundary
+        name="Call detail"
+        context={{ call_id: activeCall.call_id, id: activeCall.id, leaping_call_id: activeCall.leaping_call_id }}
+        fallback={
+          <main className="page">
+            <section className="panel error-boundary">
+              <h1>Could not render this call</h1>
+              <p className="muted">The call data is still saved. Close this view and continue reviewing other calls.</p>
+              <button type="button" onClick={closeDetail}>Back to calls</button>
+            </section>
+          </main>
+        }
+      >
+        <CallReviewShell
+          mode="page"
+          db={db}
+          setDb={setDb}
+          call={activeCall}
+          evidence={activeEvidence}
+          initialEvidenceId={selectedEvidenceId}
+          onClose={closeDetail}
+        />
+      </ErrorBoundary>
     );
   }
 
   const groupByLabel = groupBy === 'anliegen' ? 'Anliegen' : 'main issue';
+
+  async function importLeaping() {
+    console.info('[leaping-import] button clicked — starting import');
+    setImportingLeaping(true);
+    setLeapingMsg('Importing Leaping calls...');
+    try {
+      const { calls: raw, db: dbAfterFetch } = await fetchLeapingCalls(db);
+      console.info('[leaping-import] fetch complete, processing', raw.length, 'calls');
+      const result = await importLeapingRawCalls(dbAfterFetch, raw);
+      console.info('[leaping-import] processing complete — imported:', result.imported, 'updated:', result.updated, 'skipped:', result.skipped);
+      setDb(result.db);
+      console.info('[leaping-import] db updated');
+      const parts = [`${result.imported} new`, `${result.updated} updated`];
+      if (result.skipped > 0) parts.push(`${result.skipped} skipped (< 50s)`);
+      setLeapingMsg(`Leaping import complete: ${parts.join(', ')}.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[leaping-import] failed', {
+        component: 'CallsPage.importLeaping',
+        message: msg,
+        stack: e instanceof Error ? e.stack : undefined
+      });
+      const displayMsg = msg || 'Leaping import failed.';
+      setLeapingMsg(displayMsg);
+    } finally {
+      setImportingLeaping(false);
+      console.info('[leaping-import] import flow finished');
+    }
+  }
 
   return (
     <main className="page calls-cockpit">
@@ -178,6 +225,14 @@ export function CallsPage({
         <div className="row wrap workspace-toggle">
           <button
             type="button"
+            className="primary"
+            onClick={importLeaping}
+            disabled={importingLeaping}
+          >
+            {importingLeaping ? 'Importing...' : 'Import Leaping'}
+          </button>
+          <button
+            type="button"
             className={workspace === 'production' ? 'primary-soft' : ''}
             onClick={() => setWorkspace('production')}
           >
@@ -192,6 +247,17 @@ export function CallsPage({
           </button>
         </div>
       </div>
+
+      {leapingMsg && (
+        <section className="panel inline-notice">
+          <div className="row between wrap">
+            <p className="muted">{leapingMsg}</p>
+            {typeof db.leapingLastImportAt === 'string' && db.leapingLastImportAt && (
+              <span className="badge blue">Last import {db.leapingLastImportAt.slice(0, 16).replace('T', ' ')}</span>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="panel">
         <CallFiltersBar

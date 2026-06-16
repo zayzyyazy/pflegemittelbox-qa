@@ -12,11 +12,13 @@ import { buildPrimaryFriction } from '../utils/friction';
 import { deriveMainIssue } from '../utils/issueLabels';
 import { acousticNotes, shouldRunAudioListener, transcriptSignals } from '../utils/suspicionDetect';
 import { syncCallFlagsFromEvidence } from '../utils/callAnalysis';
+import { buildReviewObject } from '../utils/reviewObject';
 import { generateCallDraft, transcribeAudioDetailed } from './openaiService';
 import { loadFileFromStoredAudio } from './audioStorageService';
 import { id } from '../utils/text';
 import { nowIso } from '../utils/dates';
 import { normalizeMomentType } from '../utils/transcriptHeuristics';
+import { groundEvidenceToSegments } from '../utils/evidenceTranscript';
 
 export interface AnalyzeCallInput {
   settings: Settings;
@@ -60,34 +62,44 @@ function mapIssueType(issueType: string): EvidenceMomentType {
   return map[key] || normalizeMomentType(key);
 }
 
-function evidenceFromAudioFindings(callId: string, findings: AudioListenerFinding[], now: string): EvidenceMoment[] {
-  return findings.map(f => ({
+function evidenceFromAudioFindings(
+  callId: string,
+  findings: AudioListenerFinding[],
+  now: string,
+  segments?: TranscriptSegment[]
+): EvidenceMoment[] {
+  return findings.map(f => groundEvidenceToSegments({
     id: id('ev'),
     call_id: callId,
-    speaker: 'unknown' as const,
+    speaker: f.speaker === 'caller' || f.speaker === 'agent' ? f.speaker : 'unknown' as const,
     moment_type: mapIssueType(f.issue_type),
     severity: f.severity === 'high' || f.severity === 'low' ? f.severity : 'medium',
     timestamp_start_seconds: Number(f.start_seconds || 0),
     timestamp_end_seconds: Number(f.end_seconds || 0),
     quote_or_transcript_excerpt: f.heard.slice(0, 280),
     explanation: 'Detected by listening to call audio (not transcript alone).',
-    recommended_fix: '',
+    recommended_fix: f.suggested_action || 'Review this audible moment against transcript and call handling.',
     voice_cue_notes: f.heard,
     confidence: f.confidence >= 0.7 ? 'high' : f.confidence >= 0.4 ? 'medium' : 'low',
     source: 'audio_listener' as const,
     reviewer_status: 'pending' as const,
     created_at: now,
     updated_at: now
-  }));
+  }, segments) as EvidenceMoment);
 }
 
-function evidenceFromAcoustic(callId: string, acoustic: AcousticEvent[], now: string): EvidenceMoment[] {
+function evidenceFromAcoustic(
+  callId: string,
+  acoustic: AcousticEvent[],
+  now: string,
+  segments?: TranscriptSegment[]
+): EvidenceMoment[] {
   const topGaps = [...acoustic]
     .filter(e => e.end_ms - e.start_ms >= 8000)
     .sort((a, b) => b.end_ms - b.start_ms - (a.end_ms - a.start_ms))
     .slice(0, 3);
 
-  return topGaps.map(e => ({
+  return topGaps.map(e => groundEvidenceToSegments({
     id: id('ev'),
     call_id: callId,
     speaker: 'unknown' as const,
@@ -103,7 +115,7 @@ function evidenceFromAcoustic(callId: string, acoustic: AcousticEvent[], now: st
     reviewer_status: 'pending' as const,
     created_at: now,
     updated_at: now
-  }));
+  }, segments) as EvidenceMoment);
 }
 
 function mergeEvidence(primary: EvidenceMoment[], extra: EvidenceMoment[]): EvidenceMoment[] {
@@ -176,7 +188,7 @@ export const analysisOrchestrator = {
       listened = true;
       const fullCall =
         durationSeconds > 0 &&
-        durationSeconds <= (input.settings.alwaysListenFullCallUnderSeconds ?? 180);
+        durationSeconds <= (input.settings.alwaysListenFullCallUnderSeconds ?? 1200);
       const windows = fullCall
         ? []
         : selectClipWindows(
@@ -222,8 +234,8 @@ export const analysisOrchestrator = {
     });
 
     const audioEvidence = [
-      ...evidenceFromAcoustic(callId, acoustic, now),
-      ...evidenceFromAudioFindings(callId, audioFindings, now)
+      ...evidenceFromAcoustic(callId, acoustic, now, input.transcriptSegments),
+      ...evidenceFromAudioFindings(callId, audioFindings, now, input.transcriptSegments)
     ];
     const evidence = mergeEvidence(textEvidence, audioEvidence);
 
@@ -239,6 +251,14 @@ export const analysisOrchestrator = {
       primary_issue_label:
         deriveMainIssue({ ...draft, ...entities }, evidence) || draft.primary_issue_label
     };
+    enrichedCall.review_object = buildReviewObject({
+      call: enrichedCall,
+      evidence,
+      acousticEvents: acoustic,
+      timingSignals: timing,
+      audioFindings,
+      listenedToAudio: listened
+    });
 
     return {
       call: enrichedCall,

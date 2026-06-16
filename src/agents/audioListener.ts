@@ -4,7 +4,7 @@ import { audioFormatForFile, extractAudioClip, fileToBase64 } from '../utils/cli
 import type { AudioClipWindow } from '../types/AudioAnalysis';
 
 const AUDIO_LISTENER_SYSTEM = `You listen to German Pflegebox / care hotline call audio.
-Return strict JSON: {"findings":[{"heard":"what you hear that transcript may miss","issue_type":"caller_cut_off|long_pause|repeated_authentication|robotic_pacing|wrong_workflow|missing_integration|other","severity":"low|medium|high","start_seconds":0,"end_seconds":0,"confidence":0.0}]}
+Return strict JSON: {"findings":[{"heard":"what you hear that transcript may miss","issue_type":"caller_cut_off|long_pause|repeated_authentication|robotic_pacing|wrong_workflow|missing_integration|other","speaker":"caller|agent|unknown","severity":"low|medium|high","start_seconds":0,"end_seconds":0,"confidence":0.0,"suggested_action":"what the reviewer should check or change"}]}
 Focus on: caller frustration, sighs, cut-offs, robotic pacing, dead air, overlap, auth loops audible but poorly transcribed.
 Be specific. If audio sounds clean, return {"findings":[]}.
 Reply with JSON only — no markdown fences.`;

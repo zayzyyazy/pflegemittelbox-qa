@@ -43,7 +43,7 @@ export interface EvidenceMoment {
   /** Segment start times included in multi-line selection */
   segment_starts?: number[];
   pinned?: boolean;
-  source?: 'ai' | 'manual' | 'ai_suggested' | 'audio_listener';
+  source?: 'ai' | 'manual' | 'ai_suggested' | 'audio_listener' | 'system_rule';
   /** Reviewer triage on AI-suggested rows */
   reviewer_status?: 'pending' | 'confirmed' | 'dismissed';
   engineering_impact?: string;

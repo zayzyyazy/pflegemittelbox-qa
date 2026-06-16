@@ -120,6 +120,8 @@ export function AddCallModal({
         ...audioFields,
         transcript: result.text,
         transcript_segments: result.segments,
+        transcript_words: result.words,
+        transcription_model: result.transcription_model,
         duration_seconds: result.duration_seconds || form.duration_seconds
       });
     } catch (e: unknown) {
@@ -145,7 +147,16 @@ export function AddCallModal({
         botVersion: defaultBotVersion
       });
       setDraftEvidence(d.evidence);
-      update({ ...blank(), ...d.call, ...form, id: d.call.id, transcript: d.call.transcript || transcript });
+      update({
+        ...blank(),
+        ...d.call,
+        ...form,
+        id: d.call.id,
+        transcript: d.call.transcript || transcript,
+        transcript_segments: d.call.transcript_segments || form.transcript_segments,
+        transcript_words: d.call.transcript_words || form.transcript_words,
+        transcription_model: d.call.transcription_model || form.transcription_model
+      });
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : 'Draft failed');
     } finally {

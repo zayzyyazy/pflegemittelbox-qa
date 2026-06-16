@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Database } from '../services/storageService';
 import type { AnalysisStrictness, EvidenceSensitivity } from '../services/storageService';
+import { loginToLeaping } from '../services/leapingImportService';
 import {
   DB_KEY,
   clearDb,
@@ -19,6 +20,8 @@ type ClearAction = 'all' | 'production' | 'test' | 'demo' | null;
 
 export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database) => void }) {
   const [msg, setMsg] = useState('');
+  const [leapingTestMsg, setLeapingTestMsg] = useState('');
+  const [leapingTestBusy, setLeapingTestBusy] = useState(false);
   const [storagePath, setStoragePath] = useState('');
   const [clearAction, setClearAction] = useState<ClearAction>(null);
   const [newAreaLabel, setNewAreaLabel] = useState('');
@@ -46,6 +49,31 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
     }
   }
 
+  async function testLeapingLogin() {
+    setLeapingTestBusy(true);
+    setLeapingTestMsg('Testing login…');
+    const loginUrl = (settings.leapingLoginUrl || 'https://api.leaping.ai/v1/auth/login').trim();
+    console.info('[leaping-test] starting login test', { url: loginUrl, hasUsername: !!settings.leapingUsername?.trim() });
+    try {
+      const result = await loginToLeaping(settings);
+      const expiryDate = new Date(result.expiresAt).toLocaleString();
+      setLeapingTestMsg(
+        `Login OK.\nEndpoint: ${loginUrl}\nhas access_token: yes\nhas refresh_token: ${result.refreshToken ? 'yes' : 'no'}\nExpires: ${expiryDate}`
+      );
+      patch({
+        leapingAccessToken: result.accessToken,
+        leapingRefreshToken: result.refreshToken,
+        leapingTokenExpiresAt: result.expiresAt
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[leaping-test] login test failed', { url: loginUrl, error: msg });
+      setLeapingTestMsg(`Login failed:\n${msg}`);
+    } finally {
+      setLeapingTestBusy(false);
+    }
+  }
+
   function runClearAction() {
     if (clearAction === 'all') setDb(clearDb());
     else if (clearAction === 'production') setDb(clearProductionCalls(db));
@@ -53,6 +81,7 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
     else if (clearAction === 'demo') setDb(resetDemoDb());
     setClearAction(null);
   }
+
 
   return (
     <main className="page">
@@ -98,6 +127,91 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
       </section>
 
       <section className="panel form-grid">
+        <h2>Leaping API</h2>
+        <label className="field">
+          <span>Calls API URL</span>
+          <input
+            value={settings.leapingApiUrl || ''}
+            onChange={e => patch({ leapingApiUrl: e.target.value })}
+            placeholder="https://api.leaping.ai/v1/calls/"
+          />
+        </label>
+        <label className="field">
+          <span>Login endpoint URL</span>
+          <input
+            value={settings.leapingLoginUrl || ''}
+            onChange={e => patch({ leapingLoginUrl: e.target.value })}
+            placeholder="https://api.leaping.ai/v1/auth/login"
+          />
+        </label>
+        <label className="field">
+          <span>Username / email</span>
+          <input
+            type="email"
+            value={settings.leapingUsername || ''}
+            onChange={e => patch({ leapingUsername: e.target.value })}
+            placeholder="you@example.com"
+            autoComplete="username"
+          />
+        </label>
+        <label className="field">
+          <span>Password</span>
+          <input
+            type="password"
+            value={settings.leapingPassword || ''}
+            onChange={e => patch({ leapingPassword: e.target.value })}
+            placeholder="••••••••"
+            autoComplete="current-password"
+          />
+        </label>
+        {settings.leapingTokenExpiresAt && (
+          <p className="muted">
+            Cached token expires:{' '}
+            <strong>{new Date(settings.leapingTokenExpiresAt).toLocaleString()}</strong>
+          </p>
+        )}
+        <div className="row wrap">
+          <button
+            type="button"
+            disabled={leapingTestBusy}
+            onClick={() => { void testLeapingLogin(); }}
+          >
+            {leapingTestBusy ? 'Testing…' : 'Test Leaping login'}
+          </button>
+          {settings.leapingAccessToken && (
+            <button
+              type="button"
+              className="btn-sm"
+              onClick={() => patch({ leapingAccessToken: undefined, leapingRefreshToken: undefined, leapingTokenExpiresAt: undefined })}
+            >
+              Clear cached token
+            </button>
+          )}
+        </div>
+        {leapingTestMsg && (
+          <pre className="muted" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85em', marginTop: 8 }}>
+            {leapingTestMsg}
+          </pre>
+        )}
+        <hr style={{ margin: '12px 0', opacity: 0.3 }} />
+        <label className="field">
+          <span>Manual Bearer token (fallback)</span>
+          <input
+            type="password"
+            value={settings.leapingApiKey || ''}
+            onChange={e => patch({ leapingApiKey: e.target.value })}
+            placeholder="••••••••"
+            autoComplete="new-password"
+          />
+        </label>
+        <p className="muted privacy">
+          All credentials stored in browser localStorage — local only.
+          The app logs in automatically using username/password and caches the token for 24 hours.
+          The manual Bearer token above is used only if login credentials are not set.
+        </p>
+      </section>
+
+      <section className="panel form-grid">
         <h2>Audio listener</h2>
         <label className="field row">
           <input
@@ -105,7 +219,17 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
             checked={settings.audioListenerEnabled !== false}
             onChange={e => patch({ audioListenerEnabled: e.target.checked })}
           />
-          <span>Enable AI audio listener on suspicious calls (budget-gated)</span>
+          <span>Enable AI audio listener</span>
+        </label>
+        <label className="field">
+          <span>Audio review mode</span>
+          <select
+            value={settings.audioListenerMode || 'all'}
+            onChange={e => patch({ audioListenerMode: e.target.value as typeof settings.audioListenerMode })}
+          >
+            <option value="all">Listen to every imported call</option>
+            <option value="suspicious">Only suspicious calls / selected clips</option>
+          </select>
         </label>
         <label className="field">
           <span>Audio listener model</span>
@@ -140,9 +264,9 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           <input
             type="number"
             min={60}
-            max={600}
-            value={settings.alwaysListenFullCallUnderSeconds ?? 180}
-            onChange={e => patch({ alwaysListenFullCallUnderSeconds: Number(e.target.value) || 180 })}
+            max={1800}
+            value={settings.alwaysListenFullCallUnderSeconds ?? 1200}
+            onChange={e => patch({ alwaysListenFullCallUnderSeconds: Number(e.target.value) || 1200 })}
           />
           <span className="muted">
             Calls shorter than this get one full recording sent to the listener instead of clip windows.
@@ -173,7 +297,7 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <p className="muted privacy">
-          Local waveform analysis runs on every import. AI audio runs only when the call looks suspicious or is short.
+          Local waveform analysis runs on every audio import. AI audio review listens according to the selected mode above.
         </p>
       </section>
 

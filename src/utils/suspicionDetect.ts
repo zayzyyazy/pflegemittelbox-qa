@@ -14,6 +14,7 @@ export function shouldRunAudioListener(
 ): boolean {
   if (!settings.audioListenerEnabled) return false;
   if (!settings.openaiApiKey.trim()) return false;
+  if ((settings.audioListenerMode || 'all') === 'all') return true;
 
   const dur = durationSeconds || call.duration_seconds || 0;
   if (dur > 0 && dur <= (settings.alwaysListenFullCallUnderSeconds ?? 180)) return true;
