@@ -191,7 +191,8 @@ export function CallsPage({
       console.info('[leaping-import] db updated');
       const parts = [`${result.imported} new`, `${result.updated} updated`];
       if (result.skipped > 0) parts.push(`${result.skipped} skipped (< 50s)`);
-      setLeapingMsg(`Leaping import complete: ${parts.join(', ')}.`);
+      const batch = db.settings.leapingImportBatchSize ?? 50;
+      setLeapingMsg(`Leaping import complete (batch ${batch}): ${parts.join(', ')}.`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error('[leaping-import] failed', {
@@ -229,7 +230,7 @@ export function CallsPage({
             onClick={importLeaping}
             disabled={importingLeaping}
           >
-            {importingLeaping ? 'Importing...' : 'Import Leaping'}
+            {importingLeaping ? 'Importing...' : `Import Leaping (${db.settings.leapingImportBatchSize ?? 50})`}
           </button>
           <button
             type="button"

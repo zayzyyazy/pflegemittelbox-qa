@@ -135,11 +135,36 @@
 .call-review-page{min-height:calc(100vh - 56px);display:flex;flex-direction:column;padding-bottom:24px}
 .call-review-page-head{margin-bottom:8px}
 .call-review-page-head h1{font-size:20px;margin:0}
-.call-review-page .call-review-grid{flex:1;min-height:calc(100vh - 180px)}
-.call-review-page .call-review-transcript{max-height:calc(100vh - 200px);overflow-y:auto;padding-right:4px}
+.call-review-page .call-review-grid{flex:1;min-height:calc(100vh - 180px);grid-template-columns:minmax(280px,.9fr) minmax(420px,1.6fr);align-items:stretch}
+.call-review-page .call-review-main{max-height:calc(100vh - 160px);overflow-y:auto;padding-right:6px}
+.call-review-transcript-full{display:flex;flex-direction:column;min-height:calc(100vh - 160px);max-height:calc(100vh - 160px);border-left:1px solid #e8edef;padding-left:16px}
+.call-review-transcript-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.call-review-transcript-body .transcript-panel-body{flex:1;min-height:0;display:flex;flex-direction:column}
+.call-review-transcript-body .segment-list.tall{flex:1;max-height:none;min-height:0}
+.call-review-transcript-head{margin-bottom:8px}
+.leaping-events-inline{margin-top:10px;max-height:220px;overflow:auto;border-top:1px solid #e8edef;padding-top:8px}
+.function-log-strip{padding:10px 12px;margin:8px 0}
+.function-log-strip h3{margin:0 0 8px;font-size:13px}
+.function-log-list{display:grid;gap:6px}
+.function-log-row{display:flex;align-items:center;gap:8px;font-size:13px}
+.function-transitions{font-size:12px;margin:8px 0 0}
+.calls-table-wrap{overflow-x:auto}
+.calls-table-compact th,.calls-table-compact td{font-size:12px;padding:8px 10px}
+.calls-table-compact .clamp-cell{max-width:180px}
+.urgency-list{display:grid;gap:10px}
+.urgency-row{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px 14px;border:1px solid #e3eaed;border-radius:8px;background:#fff;text-align:left}
+.urgency-row:hover{border-color:#9ec5ce;background:#f7fbfc}
+.urgency-row.urgency-critical{border-left:4px solid #c44;background:#fffafa}
+.urgency-row.urgency-high{border-left:4px solid #d4a017}
+.urgency-summary{margin:6px 0 0;font-size:13px;color:#34444b}
+.urgency-action{margin:4px 0 0;font-size:12px}
+.urgency-reasons{margin:8px 0 0;padding-left:18px;font-size:12px;color:#52636c}
+.urgency-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.dashboard-priority-panel{margin-bottom:14px}
+.calls-table-compact tr.urgency-row-critical td{background:#fffafa}
 .call-review-sticky-bar{position:sticky;top:0;z-index:2;background:#fff;padding:8px 0;border-bottom:1px solid #e8edef;margin-bottom:4px;gap:8px}
 .call-review-actions-primary,.call-review-actions-secondary,.call-review-actions-destructive{gap:6px}
-.call-review-grid{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.2fr);gap:16px;align-items:start}
+.call-review-grid{display:grid;grid-template-columns:minmax(280px,.95fr) minmax(380px,1.55fr);gap:16px;align-items:start}
 @media(max-width:900px){.call-review-grid{grid-template-columns:1fr}}
 .call-review-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;width:100%}
 .call-review-note-input{width:100%}

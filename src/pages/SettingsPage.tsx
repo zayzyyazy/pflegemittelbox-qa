@@ -193,6 +193,27 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
             {leapingTestMsg}
           </pre>
         )}
+        <label className="field">
+          <span>Import batch size (calls per fetch)</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={settings.leapingImportBatchSize ?? 50}
+            onChange={e => patch({ leapingImportBatchSize: Number(e.target.value) || 50 })}
+          />
+        </label>
+        <label className="field row">
+          <input
+            type="checkbox"
+            checked={settings.leapingEnrichWithAi !== false}
+            onChange={e => patch({ leapingEnrichWithAi: e.target.checked })}
+          />
+          <span>Run AI review after Leaping import (merged with system rules)</span>
+        </label>
+        <p className="muted privacy">
+          Fetches up to {settings.leapingImportBatchSize ?? 50} calls per import. System rules run first; AI adds findings for unresolved or rule-hit calls (max 20 per batch).
+        </p>
         <hr style={{ margin: '12px 0', opacity: 0.3 }} />
         <label className="field">
           <span>Manual Bearer token (fallback)</span>

@@ -420,6 +420,30 @@ export function CallReviewShell({
             <p className="call-review-summary muted">{call.call_summary}</p>
           )}
 
+          {(call.function_calls?.length || call.transitions?.length) ? (
+            <section className="panel function-log-strip">
+              <h3>Execution log</h3>
+              <div className="function-log-list">
+                {(call.function_calls || []).map((fn, i) => (
+                  <div className="function-log-row" key={`${fn.name}-${i}`}>
+                    <span className={`badge ${fn.status === 'error' ? 'red' : fn.status === 'success' ? 'green' : 'neutral'}`}>
+                      {fn.status || 'unknown'}
+                    </span>
+                    <strong>{fn.name}</strong>
+                    {fn.timestamp_seconds != null && (
+                      <span className="muted">{Math.round(fn.timestamp_seconds)}s</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {(call.transitions || []).length > 0 && (
+                <p className="muted function-transitions">
+                  Transitions: {(call.transitions || []).map(t => t.label || t.node || t.to).filter(Boolean).slice(0, 6).join(' → ')}
+                </p>
+              )}
+            </section>
+          ) : null}
+
           <FindingsStrip
             call={call}
             evidence={evidence}
@@ -543,9 +567,14 @@ export function CallReviewShell({
           )}
         </div>
 
-        <div className="call-review-transcript">
-          <h3>Transcript</h3>
-          <p className="muted transcript-hint">Click or drag lines to highlight and create evidence.</p>
+        <div className="call-review-transcript call-review-transcript-full">
+          <div className="call-review-transcript-head row between wrap">
+            <div>
+              <h3>Transcript</h3>
+              <p className="muted transcript-hint">Full Leaping transcript · click a finding to jump · drag lines to highlight.</p>
+            </div>
+            <span className="badge gray">{segments.length} lines</span>
+          </div>
           {transcriptRange && !highlightDraft && (
             <TranscriptSelectionToolbar
               quote={transcriptRange.text}
@@ -554,15 +583,23 @@ export function CallReviewShell({
               onClear={() => setTranscriptRange(null)}
             />
           )}
-          <TranscriptReviewPanel
-            segments={segments}
-            filteredSegments={segments}
-            evidence={evidence as EvidenceMoment[]}
-            highlightedEvidenceId={highlightedEvidenceId}
-            onSelectRange={range => setTranscriptRange(range.text.length >= 3 ? range : null)}
-            onScrollToEvidence={setHighlightedEvidenceId}
-            onJumpToTime={s => setSeekSeconds(s + 0.01)}
-          />
+          <div className="call-review-transcript-body">
+            <TranscriptReviewPanel
+              segments={segments}
+              filteredSegments={segments}
+              evidence={evidence as EvidenceMoment[]}
+              highlightedEvidenceId={highlightedEvidenceId}
+              onSelectRange={range => setTranscriptRange(range.text.length >= 3 ? range : null)}
+              onScrollToEvidence={setHighlightedEvidenceId}
+              onJumpToTime={s => setSeekSeconds(s + 0.01)}
+            />
+            {call.leaping_transcript_events?.length ? (
+              <details className="leaping-events-inline">
+                <summary>Leaping events ({call.leaping_transcript_events.length}) — functions, field updates, transitions</summary>
+                <LeapingTranscriptEvents events={call.leaping_transcript_events} />
+              </details>
+            ) : null}
+          </div>
         </div>
       </div>
 

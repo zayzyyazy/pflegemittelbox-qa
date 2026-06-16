@@ -16,6 +16,14 @@ import { id } from '../utils/text';
 import { nowIso } from '../utils/dates';
 import { extractEntitiesFromTranscript } from '../utils/entityExtract';
 import { buildReviewObject } from '../utils/reviewObject';
+import {
+  allLeapingTranscriptEvents,
+  compactLeapingEventsForStorage,
+  segmentsFromLeapingEvents,
+  transcriptTextFromLeapingEvents
+} from '../utils/leapingTranscript';
+import { generateCallDraft } from './openaiService';
+import { normalizeEvidenceForImport } from '../utils/evidenceReview';
 
 const MIN_CALL_SECONDS = 50;
 
@@ -61,30 +69,33 @@ function normalizeStatus(raw: string): MarieCallStatus {
   return 'unknown';
 }
 
-function normalizeTranscriptSegments(raw: unknown): TranscriptSegment[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const segments = raw.map<TranscriptSegment | null>(item => {
-    const s = asObj(item);
-    const type = firstString(s, ['type']);
-    if (type && type !== 'message' && type !== 'chat_message') return null;
-    const sender = firstString(s, ['sender', 'speaker', 'role']).toLowerCase();
-    return {
-      start: firstNumber(s, ['start', 'start_seconds', 'start_time']),
-      end: firstNumber(s, ['end', 'end_seconds', 'end_time']),
-      speaker: sender.includes('bot') || sender.includes('agent') || sender.includes('marie') ? 'agent' as const :
-        sender.includes('human') || sender.includes('caller') || sender.includes('user')
-          ? 'caller' as const
-          : 'unknown' as const,
-      text: firstString(s, ['text', 'transcript', 'content', 'message'])
-    };
-  }).filter((s): s is TranscriptSegment => !!s && !!s.text);
-  return segments.length ? segments : undefined;
+function normalizeTranscriptSegments(raw: unknown, events: unknown[] = []): TranscriptSegment[] | undefined {
+  if (Array.isArray(raw) && raw.length) {
+    const fromRaw = raw.map<TranscriptSegment | null>(item => {
+      const s = asObj(item);
+      const type = firstString(s, ['type']);
+      if (type && type !== 'message' && type !== 'chat_message') return null;
+      const sender = firstString(s, ['sender', 'speaker', 'role']).toLowerCase();
+      const start = firstNumber(s, ['time', 'start', 'start_seconds', 'start_time', 'timestamp_seconds']);
+      const end = firstNumber(s, ['end', 'end_seconds', 'end_time']);
+      return {
+        start,
+        end: end > start ? end : start + 1,
+        speaker: sender.includes('bot') || sender.includes('agent') || sender.includes('marie') ? 'agent' as const :
+          sender.includes('human') || sender.includes('caller') || sender.includes('user')
+            ? 'caller' as const
+            : 'unknown' as const,
+        text: firstString(s, ['text', 'transcript', 'content', 'message'])
+      };
+    }).filter((s): s is TranscriptSegment => !!s && !!s.text);
+    if (fromRaw.length) return fromRaw;
+  }
+  const fromEvents = segmentsFromLeapingEvents(events);
+  return fromEvents.length ? fromEvents : undefined;
 }
 
 function rawTranscriptEvents(raw: Obj): unknown[] {
-  const value = nested(raw, [['transcript'], ['events'], ['messages'], ['call', 'transcript'], ['results', 'transcript']]);
-  // Capped at 80 to keep localStorage usage manageable (was 500 — caused QuotaExceededError)
-  return Array.isArray(value) ? value.slice(0, 80) : [];
+  return allLeapingTranscriptEvents(raw);
 }
 
 function endFieldsFromEvents(events: unknown[]): Obj {
@@ -278,18 +289,60 @@ function runSystemRules(call: Partial<CallReview>, transcript: string): Evidence
     }));
   }
 
+  const inScope =
+    call.anliegen === 'cancel_or_pause' ||
+    call.anliegen === 'box_or_product_change' ||
+    call.anliegen === 'address_or_account_change';
+  const forwarded =
+    call.marie_main_result === 'transferred' ||
+    call.marie_call_status === 'transferred' ||
+    /weiterleit|verbinde|kollege/.test(lower);
+  const inFlowCapable = names.some(n =>
+    /pause|kuendig|kündig|cancel|box|adresse|address|update/.test(n)
+  );
+  if (inScope && forwarded && !inFlowCapable) {
+    evidence.push(makeEvidence(callId, {
+      moment_type: 'wrong_workflow',
+      severity: 'high',
+      explanation: 'System rule: caller intent is in-scope for Marie automation, but call was forwarded without a matching in-flow function.',
+      recommended_fix: 'Check routing — pause, kündigen, box change, and address updates should run in-flow when functions are available.',
+      linked_issue_suggestion: 'unnecessary_forward'
+    }));
+  }
+
+  const promisePatterns = [
+    /ich (mache|bearbeite|trage|aktualisiere|pruefe|prüfe|kuendige|kündige|pausiere)/,
+    /ich werde/,
+    /einen moment.*(bearbeit|pruef|prüf|eintrag)/
+  ];
+  const promised = promisePatterns.some(re => re.test(lower));
+  const confirmed = /(bestätigt|bestaetigt|eingetragen|erledigt|vorgenommen|erfolgreich)/.test(lower);
+  if (promised && !confirmed && !forwarded && call.marie_main_result !== 'solved_by_marie') {
+    evidence.push(makeEvidence(callId, {
+      moment_type: 'unresolved_request',
+      severity: 'high',
+      explanation: 'System rule: Marie promised an action in speech but no completion language or successful function outcome was detected.',
+      recommended_fix: 'Compare agent promises to function_calls log — flag when execution is missing.',
+      linked_issue_suggestion: 'promise_not_executed'
+    }));
+  }
+
   return evidence;
 }
 
 
 export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evidence: EvidenceMoment[]; rawId: string } {
   const raw = asObj(rawValue);
-  const events = rawTranscriptEvents(raw);
-  const endFields = endFieldsFromEvents(events);
+  const allEvents = rawTranscriptEvents(raw);
+  const events = compactLeapingEventsForStorage(allEvents);
+  const endFields = endFieldsFromEvents(allEvents);
   const segments = normalizeTranscriptSegments(
-    nested(raw, [['transcript_segments'], ['segments'], ['messages'], ['call', 'segments'], ['results', 'segments']]) || events
+    nested(raw, [['transcript_segments'], ['segments'], ['messages'], ['call', 'segments'], ['results', 'segments']]),
+    allEvents
   );
-  const transcript = transcriptFrom(raw, segments, events);
+  const transcript =
+    transcriptFrom(raw, segments, allEvents) ||
+    transcriptTextFromLeapingEvents(allEvents);
   const entities = extractEntitiesFromTranscript(transcript);
   const rawId = firstString(raw, ['id', 'call_id', 'conversation_id', 'uuid']) ||
     firstString(endFields, ['leaping_call_id']) ||
@@ -300,8 +353,8 @@ export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evi
     ? rawStatus
     : firstString(endFields, ['leaping_call_status']) || rawStatus;
   const status = normalizeStatus(statusRaw);
-  const functionCalls = normalizeFunctionCalls(raw, events);
-  const transitions = normalizeTransitions(raw, events);
+  const functionCalls = normalizeFunctionCalls(raw, allEvents);
+  const transitions = normalizeTransitions(raw, allEvents);
   const result = inferResult(functionCalls, transitions, status, transcript);
   const anliegen = inferAnliegen(raw, transcript);
   const summary = firstString(raw, ['summary', 'call_summary']) ||
@@ -551,7 +604,10 @@ export async function fetchLeapingCalls(db: Database): Promise<{ calls: unknown[
     throw new Error(`Invalid Leaping API URL: "${rawUrl}"`);
   }
 
-  if (!callsUrl.searchParams.has('limit')) callsUrl.searchParams.set('limit', '100');
+  if (!callsUrl.searchParams.has('limit')) {
+    const batch = Math.min(100, Math.max(1, db.settings.leapingImportBatchSize || 50));
+    callsUrl.searchParams.set('limit', String(batch));
+  }
   const requestUrl = callsUrl.toString();
 
   const hasLoginConfig = !!(db.settings.leapingUsername?.trim() && db.settings.leapingPassword?.trim());
@@ -679,6 +735,99 @@ async function downloadRecordingToFile(url: string, callId: string): Promise<Fil
   }
 }
 
+async function enrichLeapingCallWithAi(
+  settings: Settings,
+  call: CallReview,
+  ruleEvidence: EvidenceMoment[]
+): Promise<{ call: CallReview; extraEvidence: EvidenceMoment[] }> {
+  if (!settings.openaiApiKey?.trim() || settings.leapingEnrichWithAi === false) {
+    return { call, extraEvidence: [] };
+  }
+
+  const ruleSummary = ruleEvidence
+    .map(e => `- ${e.moment_type}: ${e.explanation}`)
+    .join('\n');
+
+  const fnSummary = (call.function_calls || [])
+    .slice(0, 12)
+    .map(f => `${f.name} (${f.status || 'unknown'})`)
+    .join(', ');
+
+  try {
+    const { call: aiCall, evidence: aiEvidence } = await generateCallDraft(settings, {
+      transcript: call.transcript,
+      transcriptSegments: call.transcript_segments,
+      existingCallId: call.id,
+      existingCall: call,
+      reviewerContext:
+        `Leaping import QA. System rules already fired:\n${ruleSummary || '(none)'}\n` +
+        `Function calls: ${fnSummary || '(none)'}\n` +
+        `Marie status: ${call.marie_call_status || 'unknown'} · result: ${call.marie_main_result || 'unknown'}\n` +
+        'Confirm or add findings the rules may have missed. Do not contradict confirmed system rules unless transcript clearly disproves them.'
+    });
+
+    const merged = normalizeEvidenceForImport(
+      (aiEvidence || []).filter(e => e.source !== 'system_rule')
+    );
+
+    return {
+      call: {
+        ...call,
+        ...aiCall,
+        id: call.id,
+        call_id: call.call_id,
+        leaping_call_id: call.leaping_call_id,
+        function_calls: call.function_calls,
+        transitions: call.transitions,
+        leaping_transcript_events: call.leaping_transcript_events,
+        review_object: buildReviewObject({
+          call: { ...call, ...aiCall },
+          evidence: [...ruleEvidence, ...merged],
+          listenedToAudio: false
+        })
+      },
+      extraEvidence: merged as EvidenceMoment[]
+    };
+  } catch (err) {
+    console.warn('[leaping-import] AI enrichment skipped for call', call.call_id, err);
+    return { call, extraEvidence: [] };
+  }
+}
+
+async function enrichImportedLeapingCalls(
+  db: Database,
+  calls: CallReview[],
+  evidence: EvidenceMoment[],
+  importedIds: Set<string>
+): Promise<{ calls: CallReview[]; evidence: EvidenceMoment[] }> {
+  const targets = calls.filter(c =>
+    importedIds.has(c.id) &&
+    c.transcript &&
+    c.transcript.length > 40 &&
+    (
+      c.solved_status === 'no' ||
+      c.marie_call_status === 'dropped' ||
+      c.marie_call_status === 'failed' ||
+      evidence.some(e => e.call_id === c.id && e.source === 'system_rule')
+    )
+  ).slice(0, 20);
+
+  if (!targets.length) return { calls, evidence };
+
+  const nextCalls = [...calls];
+  const nextEvidence = [...evidence];
+
+  for (const call of targets) {
+    const ruleEv = nextEvidence.filter(e => e.call_id === call.id && e.source === 'system_rule');
+    const { call: enriched, extraEvidence } = await enrichLeapingCallWithAi(db.settings, call, ruleEv);
+    const idx = nextCalls.findIndex(c => c.id === call.id);
+    if (idx >= 0) nextCalls[idx] = enriched;
+    nextEvidence.push(...extraEvidence);
+  }
+
+  return { calls: nextCalls, evidence: nextEvidence };
+}
+
 export async function importLeapingRawCalls(
   db: Database,
   rawCalls: unknown[]
@@ -688,10 +837,11 @@ export async function importLeapingRawCalls(
   let imported = 0;
   let updated = 0;
   let skipped = 0;
-  const calls = [...db.calls];
-  const evidence = db.evidence.filter(e => e.source !== 'system_rule' || !String(e.call_id).startsWith('leaping_'));
+  let calls = [...db.calls];
+  let evidence = db.evidence.filter(e => e.source !== 'system_rule' || !String(e.call_id).startsWith('leaping_'));
   // Store only id + timestamp (no raw payload) to stay within localStorage limits
   const rawStore: Array<{ id: string; imported_at: string }> = (db.leapingRawCalls || []).map(r => ({ id: r.id, imported_at: r.imported_at }));
+  const touchedIds = new Set<string>();
 
   for (const raw of rawCalls) {
     let normalized: ReturnType<typeof normalizeLeapingCall>;
@@ -774,6 +924,7 @@ export async function importLeapingRawCalls(
       calls.unshift(normalized.call);
       imported++;
     }
+    touchedIds.add(normalized.call.id);
     evidence.push(...normalized.evidence);
     const rawIndex = rawStore.findIndex(item => item.id === normalized.rawId);
     const rawItem = { id: normalized.rawId, imported_at: now };
@@ -782,6 +933,10 @@ export async function importLeapingRawCalls(
   }
 
   console.info('[leaping-import] import complete', { imported, updated, skipped, totalCalls: calls.length, totalEvidence: evidence.length });
+
+  const enriched = await enrichImportedLeapingCalls(db, calls, evidence, touchedIds);
+  calls = enriched.calls;
+  evidence = enriched.evidence;
 
   let nextDb: Database;
   try {

@@ -48,6 +48,10 @@ export interface Settings {
   leapingAccessToken?: string;
   leapingRefreshToken?: string;
   leapingTokenExpiresAt?: string;
+  /** How many Leaping calls to fetch per import (default 50). */
+  leapingImportBatchSize?: number;
+  /** Run OpenAI extraction after Leaping import, merged with system rules. */
+  leapingEnrichWithAi?: boolean;
   dbRecoveryNotice?: string;
 }
 
@@ -91,7 +95,9 @@ export const defaultSettings: Settings = {
   leapingLoginUrl: 'https://api.leaping.ai/v1/auth/login',
   leapingUsername: '',
   leapingPassword: '',
-  leapingApiKey: ''
+  leapingApiKey: '',
+  leapingImportBatchSize: 50,
+  leapingEnrichWithAi: true
 };
 
 function emptyDatabase(): Database {

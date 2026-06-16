@@ -10,7 +10,7 @@ function text(value: unknown) {
 }
 
 export function LeapingTranscriptEvents({ events }: { events?: unknown[] }) {
-  const rows = Array.isArray(events) ? events.slice(0, 200) : [];
+  const rows = Array.isArray(events) ? events : [];
   if (!rows.length) return null;
 
   return (
