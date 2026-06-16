@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Database } from '../services/storageService';
 import type { AnalysisStrictness, EvidenceSensitivity } from '../services/storageService';
 import { loginToLeaping } from '../services/leapingImportService';
+import { isSupabaseAnonKey, resolveSupabaseAnonKey } from '../services/leapingSupabaseConfig';
 import {
   DB_KEY,
   clearDb,
@@ -22,6 +23,7 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
   const [msg, setMsg] = useState('');
   const [leapingTestMsg, setLeapingTestMsg] = useState('');
   const [leapingTestBusy, setLeapingTestBusy] = useState(false);
+  const [anonKeyStatus, setAnonKeyStatus] = useState('');
   const [storagePath, setStoragePath] = useState('');
   const [clearAction, setClearAction] = useState<ClearAction>(null);
   const [newAreaLabel, setNewAreaLabel] = useState('');
@@ -35,6 +37,36 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
       setStoragePath('Browser mode — audio in localStorage (dev only)');
     }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const stored = settings.leapingSupabaseAnonKey?.trim() || '';
+      if (stored && isSupabaseAnonKey(stored)) {
+        setAnonKeyStatus('Using cached Supabase anon key.');
+        return;
+      }
+      try {
+        const resolved = await resolveSupabaseAnonKey(settings);
+        if (cancelled) return;
+        if (resolved.settingsPatch?.leapingSupabaseAnonKey) {
+          patch(resolved.settingsPatch);
+        }
+        setAnonKeyStatus(
+          resolved.source === 'builtin'
+            ? 'Supabase anon key auto-loaded from Leaping platform (cached locally).'
+            : resolved.source === 'discovered'
+              ? 'Supabase anon key discovered from Leaping platform bundles (cached locally).'
+              : 'Using saved Supabase anon key.'
+        );
+      } catch {
+        if (!cancelled) {
+          setAnonKeyStatus('Anon key not set — will auto-resolve on login for Leaping Supabase.');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [settings.leapingLoginUrl]);
 
   function patch(p: Partial<typeof settings>) {
     setDb({ ...db, settings: { ...settings, ...p } });
@@ -137,15 +169,31 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <label className="field">
-          <span>Login endpoint URL</span>
+          <span>Login endpoint URL (Supabase Auth)</span>
           <input
             value={settings.leapingLoginUrl || ''}
             onChange={e => patch({ leapingLoginUrl: e.target.value })}
-            placeholder="https://api.leaping.ai/v1/auth/login"
+            placeholder="https://YOUR-PROJECT.supabase.co/auth/v1/token?grant_type=password"
           />
         </label>
         <label className="field">
-          <span>Username / email</span>
+          <span>Supabase anon API key</span>
+          <input
+            type="password"
+            value={settings.leapingSupabaseAnonKey || ''}
+            onChange={e => patch({ leapingSupabaseAnonKey: e.target.value })}
+            placeholder="Auto-filled from Leaping platform"
+            autoComplete="off"
+          />
+          <span className="muted">
+            {anonKeyStatus || 'Auto-resolved from Leaping platform JS — only paste manually if auto-detect fails.'}
+            {settings.leapingSupabaseAnonKey && !isSupabaseAnonKey(settings.leapingSupabaseAnonKey)
+              ? ' Warning: current value looks like an access token, not an anon key.'
+              : ''}
+          </span>
+        </label>
+        <label className="field">
+          <span>Email</span>
           <input
             type="email"
             value={settings.leapingUsername || ''}
@@ -215,20 +263,25 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           Fetches up to {settings.leapingImportBatchSize ?? 50} calls per import. System rules run first; AI adds findings for unresolved or rule-hit calls (max 20 per batch).
         </p>
         <hr style={{ margin: '12px 0', opacity: 0.3 }} />
-        <label className="field">
-          <span>Manual Bearer token (fallback)</span>
-          <input
-            type="password"
-            value={settings.leapingApiKey || ''}
-            onChange={e => patch({ leapingApiKey: e.target.value })}
-            placeholder="••••••••"
-            autoComplete="new-password"
-          />
-        </label>
+        <details>
+          <summary className="muted">Advanced: manual Bearer token (legacy fallback)</summary>
+          <label className="field" style={{ marginTop: 8 }}>
+            <span>Manual Bearer token</span>
+            <input
+              type="password"
+              value={settings.leapingApiKey || ''}
+              onChange={e => patch({ leapingApiKey: e.target.value })}
+              placeholder="Only if email/password login is unavailable"
+              autoComplete="new-password"
+            />
+          </label>
+          <p className="muted privacy">
+            Not needed for normal use. Email + password login obtains a Bearer token automatically.
+            Do not paste the anon key here — it is a different value.
+          </p>
+        </details>
         <p className="muted privacy">
-          All credentials stored in browser localStorage — local only.
-          The app logs in automatically using username/password and caches the token for 24 hours.
-          The manual Bearer token above is used only if login credentials are not set.
+          Leaping uses Supabase Auth. Email + password are enough; anon key and tokens are cached locally.
         </p>
       </section>
 

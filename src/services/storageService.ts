@@ -18,6 +18,7 @@ import { deriveMainIssue } from '../utils/issueLabels';
 import { normalizeMomentType } from '../utils/transcriptHeuristics';
 import { normalizeCallerRequest } from '../utils/filterNormalize';
 import { callWorkspace } from '../utils/workspace';
+import { LEAPING_SUPABASE_ANON_KEY } from './leapingSupabaseConfig';
 
 function isValidSolvedStatus(value: unknown): value is SolvedStatus {
   return value === 'yes' || value === 'partially' || value === 'no';
@@ -45,6 +46,8 @@ export interface Settings {
   leapingUsername: string;
   leapingPassword: string;
   leapingApiKey: string;
+  /** Supabase anon/public key — required for Leaping Supabase Auth login & refresh. */
+  leapingSupabaseAnonKey?: string;
   leapingAccessToken?: string;
   leapingRefreshToken?: string;
   leapingTokenExpiresAt?: string;
@@ -92,10 +95,11 @@ export const defaultSettings: Settings = {
   maxClipSeconds: 30,
   alwaysListenFullCallUnderSeconds: 1200,
   leapingApiUrl: '',
-  leapingLoginUrl: 'https://api.leaping.ai/v1/auth/login',
+  leapingLoginUrl: 'https://vcugyztbqrrsddgolqbz-all.supabase.co/auth/v1/token?grant_type=password',
   leapingUsername: '',
   leapingPassword: '',
   leapingApiKey: '',
+  leapingSupabaseAnonKey: LEAPING_SUPABASE_ANON_KEY,
   leapingImportBatchSize: 50,
   leapingEnrichWithAi: true
 };
