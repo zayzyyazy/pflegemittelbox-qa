@@ -24,6 +24,12 @@ import {
 } from '../utils/leapingTranscript';
 import { generateCallDraft } from './openaiService';
 import { normalizeEvidenceForImport } from '../utils/evidenceReview';
+import {
+  maskAuthHeaders,
+  resolveSupabaseAnonKey,
+  summarizeAuthResponse,
+  type ResolvedSupabaseAnonKey
+} from './leapingSupabaseConfig';
 
 const MIN_CALL_SECONDS = 50;
 
@@ -558,28 +564,43 @@ interface LoginResult {
   settingsPatch: Partial<Settings>;
 }
 
+function mergeSettingsPatch(
+  base: Partial<Settings> | undefined,
+  extra: Partial<Settings> | undefined
+): Partial<Settings> {
+  return { ...base, ...extra };
+}
+
+async function ensureSupabaseAnonKey(settings: Settings): Promise<ResolvedSupabaseAnonKey> {
+  return resolveSupabaseAnonKey(settings);
+}
+
 async function loginToSupabase(settings: Settings): Promise<LoginResult> {
   const loginUrl = (settings.leapingLoginUrl || '').trim();
   const email = (settings.leapingUsername || '').trim();
   const password = (settings.leapingPassword || '').trim();
-  const anonKey = (settings.leapingSupabaseAnonKey || '').trim();
 
   if (!email || !password) {
     throw new Error('Leaping email and password are not configured — add them in Settings.');
   }
-  if (!anonKey) {
-    throw new Error(
-      'Supabase anon API key is required for Leaping login.\n' +
-      'Add it in Settings → Leaping API → Supabase anon key.'
-    );
-  }
+
+  const resolved = await ensureSupabaseAnonKey(settings);
+  const headers = supabaseAuthHeaders(resolved.anonKey);
+  const body = { email, password };
+
+  console.info('[leaping-auth] Supabase password login request', {
+    url: loginUrl,
+    headers: maskAuthHeaders(headers),
+    anonKeySource: resolved.source,
+    body: { email }
+  });
 
   let res: Response;
   try {
     res = await fetch(loginUrl, {
       method: 'POST',
-      headers: supabaseAuthHeaders(anonKey),
-      body: JSON.stringify({ email, password })
+      headers,
+      body: JSON.stringify(body)
     });
   } catch (err) {
     throw new Error(
@@ -588,10 +609,23 @@ async function loginToSupabase(settings: Settings): Promise<LoginResult> {
   }
 
   const bodyText = await res.text().catch(() => '');
+  let json: unknown = null;
+  try {
+    json = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    json = null;
+  }
+
+  console.info('[leaping-auth] Supabase password login response', {
+    url: loginUrl,
+    status: res.status,
+    ...summarizeAuthResponse(json)
+  });
+
   if (!res.ok) {
     let sanitized: string;
     try {
-      sanitized = JSON.stringify(JSON.parse(bodyText)).slice(0, 400);
+      sanitized = JSON.stringify(json).slice(0, 400);
     } catch {
       sanitized = bodyText.slice(0, 400);
     }
@@ -600,18 +634,17 @@ async function loginToSupabase(settings: Settings): Promise<LoginResult> {
     );
   }
 
-  let json: unknown;
-  try {
-    json = JSON.parse(bodyText);
-  } catch {
+  if (!json) {
     throw new Error(`Supabase login returned non-JSON (HTTP ${res.status}).`);
   }
 
   const result = parseAuthResponse(json, res.status);
+  result.settingsPatch = mergeSettingsPatch(result.settingsPatch, resolved.settingsPatch);
   console.info('[leaping-auth] Supabase login success', {
     hasAccessToken: true,
     hasRefreshToken: !!result.refreshToken,
-    expiresAt: result.expiresAt
+    expiresAt: result.expiresAt,
+    anonKeySource: resolved.source
   });
   return result;
 }
@@ -678,7 +711,6 @@ async function loginToLeapingLegacy(settings: Settings): Promise<LoginResult> {
 export async function refreshLeapingToken(settings: Settings): Promise<LoginResult> {
   const loginUrl = (settings.leapingLoginUrl || '').trim();
   const refreshToken = (settings.leapingRefreshToken || '').trim();
-  const anonKey = (settings.leapingSupabaseAnonKey || '').trim();
 
   if (!isSupabaseAuthUrl(loginUrl)) {
     throw new Error('Token refresh is only supported for Supabase auth endpoints.');
@@ -686,16 +718,23 @@ export async function refreshLeapingToken(settings: Settings): Promise<LoginResu
   if (!refreshToken) {
     throw new Error('No cached refresh token — password login required.');
   }
-  if (!anonKey) {
-    throw new Error('Supabase anon API key is required for token refresh.');
-  }
 
+  const resolved = await ensureSupabaseAnonKey(settings);
   const refreshUrl = supabaseRefreshUrl(loginUrl);
+  const headers = supabaseAuthHeaders(resolved.anonKey);
+
+  console.info('[leaping-auth] Supabase refresh request', {
+    url: refreshUrl,
+    headers: maskAuthHeaders(headers),
+    anonKeySource: resolved.source,
+    hasRefreshToken: true
+  });
+
   let res: Response;
   try {
     res = await fetch(refreshUrl, {
       method: 'POST',
-      headers: supabaseAuthHeaders(anonKey),
+      headers,
       body: JSON.stringify({ refresh_token: refreshToken })
     });
   } catch (err) {
@@ -703,25 +742,40 @@ export async function refreshLeapingToken(settings: Settings): Promise<LoginResu
   }
 
   const bodyText = await res.text().catch(() => '');
+  let json: unknown = null;
+  try {
+    json = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    json = null;
+  }
+
+  console.info('[leaping-auth] Supabase refresh response', {
+    url: refreshUrl,
+    status: res.status,
+    ...summarizeAuthResponse(json)
+  });
+
   if (!res.ok) {
     let sanitized: string;
     try {
-      sanitized = JSON.stringify(JSON.parse(bodyText)).slice(0, 400);
+      sanitized = JSON.stringify(json).slice(0, 400);
     } catch {
       sanitized = bodyText.slice(0, 400);
     }
     throw new Error(`Supabase token refresh failed.\nHTTP ${res.status}\nResponse: ${sanitized}`);
   }
 
-  let json: unknown;
-  try {
-    json = JSON.parse(bodyText);
-  } catch {
+  if (!json) {
     throw new Error(`Supabase refresh returned non-JSON (HTTP ${res.status}).`);
   }
 
   const result = parseAuthResponse(json, res.status);
-  console.info('[leaping-auth] Supabase refresh success', { expiresAt: result.expiresAt });
+  result.settingsPatch = mergeSettingsPatch(result.settingsPatch, resolved.settingsPatch);
+  console.info('[leaping-auth] Supabase refresh success', {
+    expiresAt: result.expiresAt,
+    hasRefreshToken: !!result.refreshToken,
+    anonKeySource: resolved.source
+  });
   return result;
 }
 
@@ -746,11 +800,7 @@ async function acquireLeapingToken(settings: Settings): Promise<LoginResult> {
   const loginUrl = (settings.leapingLoginUrl || '').trim();
   const hasCreds = !!(settings.leapingUsername?.trim() && settings.leapingPassword?.trim());
 
-  if (
-    settings.leapingRefreshToken?.trim() &&
-    isSupabaseAuthUrl(loginUrl) &&
-    settings.leapingSupabaseAnonKey?.trim()
-  ) {
+  if (settings.leapingRefreshToken?.trim() && isSupabaseAuthUrl(loginUrl)) {
     try {
       console.info('[leaping-auth] access token expired — refreshing');
       return await refreshLeapingToken(settings);
@@ -767,7 +817,8 @@ async function acquireLeapingToken(settings: Settings): Promise<LoginResult> {
   }
 
   const manualToken = (settings.leapingApiKey || '').trim();
-  if (manualToken) {
+  if (manualToken && !hasCreds) {
+    console.warn('[leaping-auth] using manual Bearer token — email/password login is preferred');
     return {
       accessToken: manualToken,
       expiresAt: new Date(Date.now() + TOKEN_LIFETIME_MS).toISOString(),
@@ -777,7 +828,7 @@ async function acquireLeapingToken(settings: Settings): Promise<LoginResult> {
 
   throw new Error(
     'No Leaping credentials configured.\n' +
-    'Add Supabase email + password + anon key, or paste a manual Bearer token in Settings.'
+    'Add your Leaping email and password in Settings — Supabase anon key is resolved automatically.'
   );
 }
 
@@ -812,7 +863,8 @@ export async function fetchLeapingCalls(db: Database): Promise<{ calls: unknown[
     }
   } catch (authErr) {
     const manualToken = (db.settings.leapingApiKey || '').trim();
-    if (manualToken) {
+    const hasCreds = !!(db.settings.leapingUsername?.trim() && db.settings.leapingPassword?.trim());
+    if (manualToken && !hasCreds) {
       console.warn('[leaping-auth] auth failed, falling back to manual Bearer token', {
         error: authErr instanceof Error ? authErr.message : String(authErr)
       });
@@ -859,7 +911,7 @@ export async function fetchLeapingCalls(db: Database): Promise<{ calls: unknown[
       res = await makeRequest(token);
     } catch (retryErr) {
       const manualToken = (db.settings.leapingApiKey || '').trim();
-      if (manualToken) {
+      if (manualToken && !hasLoginConfig) {
         token = manualToken;
         res = await makeRequest(token);
       } else {

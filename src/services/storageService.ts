@@ -18,6 +18,7 @@ import { deriveMainIssue } from '../utils/issueLabels';
 import { normalizeMomentType } from '../utils/transcriptHeuristics';
 import { normalizeCallerRequest } from '../utils/filterNormalize';
 import { callWorkspace } from '../utils/workspace';
+import { LEAPING_SUPABASE_ANON_KEY } from './leapingSupabaseConfig';
 
 function isValidSolvedStatus(value: unknown): value is SolvedStatus {
   return value === 'yes' || value === 'partially' || value === 'no';
@@ -98,7 +99,7 @@ export const defaultSettings: Settings = {
   leapingUsername: '',
   leapingPassword: '',
   leapingApiKey: '',
-  leapingSupabaseAnonKey: '',
+  leapingSupabaseAnonKey: LEAPING_SUPABASE_ANON_KEY,
   leapingImportBatchSize: 50,
   leapingEnrichWithAi: true
 };
