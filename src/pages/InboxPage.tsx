@@ -8,6 +8,7 @@ import { InboxPipelineBar } from '../components/calls/InboxPipelineBar';
 import { reprocessDraftFromStorage } from '../services/importRecordingsService';
 import { PinnedCallsStrip } from '../components/calls/PinnedCallsStrip';
 import { callWorkspace } from '../utils/workspace';
+import { LeapingImportButton, LeapingImportNotice, useLeapingImport } from '../components/calls/LeapingImportBar';
 
 export function InboxPage({
   db,
@@ -22,6 +23,7 @@ export function InboxPage({
   openCall?: (id: string) => void;
   onCallSaved?: (call: Partial<CallReview>) => void;
 }) {
+  const leaping = useLeapingImport(db, setDb);
   const drafts = db.drafts || [];
   const processing = drafts.filter(d => d.status === 'queued' || d.status === 'processing');
   const failedDrafts = drafts.filter(d => d.status === 'failed');
@@ -59,12 +61,17 @@ export function InboxPage({
       <div className="page-head">
         <div>
           <h1>Inbox</h1>
-          <p className="muted">Import → Save ready calls → library under Calls.</p>
+          <p className="muted">Import Leaping batch or drop audio files → save ready calls → library under Calls.</p>
         </div>
-        {readyDrafts.length > 0 && (
-          <p className="inbox-ready-count">{readyDrafts.length} ready</p>
-        )}
+        <div className="row wrap">
+          <LeapingImportButton db={db} importing={leaping.importing} onImport={() => void leaping.runImport()} />
+          {readyDrafts.length > 0 && (
+            <p className="inbox-ready-count">{readyDrafts.length} ready</p>
+          )}
+        </div>
       </div>
+
+      <LeapingImportNotice message={leaping.message} lastImportAt={leaping.lastImportAt} />
 
       <InboxPipelineBar db={db} />
 

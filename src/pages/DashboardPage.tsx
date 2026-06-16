@@ -11,6 +11,7 @@ import { callWorkspace } from '../utils/workspace';
 import { rankCallsByUrgency, type CatastropheLevel } from '../utils/callUrgency';
 import { CallerRequestTag } from '../components/calls/CallerRequestTag';
 import { ResultPill } from '../components/calls/ResultPill';
+import { LeapingImportButton, LeapingImportNotice, useLeapingImport } from '../components/calls/LeapingImportBar';
 
 function catastropheTone(level: CatastropheLevel): 'red' | 'yellow' | 'blue' | 'neutral' {
   if (level === 'critical') return 'red';
@@ -40,6 +41,7 @@ function miniQueueCard({
 
 export function DashboardPage({
   db,
+  setDb,
   openInbox,
   openIssue,
   openCall
@@ -50,6 +52,7 @@ export function DashboardPage({
   openIssue: (id: string) => void;
   openCall: (id: string, evidenceId?: string) => void;
 }) {
+  const leaping = useLeapingImport(db, setDb);
   const issues = activeIssues(db.issues);
   const productionCalls = db.calls.filter(c => callWorkspace(c) === 'production');
   const counts = requestCounts(productionCalls);
@@ -73,7 +76,12 @@ export function DashboardPage({
           <h1>Dashboard</h1>
           <p>Start here — review the worst calls first, then triage the rest.</p>
         </div>
+        <div className="row wrap">
+          <LeapingImportButton db={db} importing={leaping.importing} onImport={() => void leaping.runImport()} />
+        </div>
       </div>
+
+      <LeapingImportNotice message={leaping.message} lastImportAt={leaping.lastImportAt} />
 
       <section className="queue-grid">
         {miniQueueCard({ label: 'Review now', count: urgentCalls.length, tone: urgentCalls.length ? 'red' : undefined })}

@@ -22,7 +22,6 @@ import {
 import { groupCalls } from '../utils/callGrouping';
 import { toggleCallFlag } from '../services/callTriageService';
 import { deleteCallWithAudio } from '../services/callsService';
-import { fetchLeapingCalls, importLeapingRawCalls } from '../services/leapingImportService';
 import { ConfirmDeleteModal } from '../components/ui/ConfirmDeleteModal';
 import { buildDuplicateIndex } from '../services/duplicateService';
 import { CallReviewShell } from '../components/calls/CallReviewShell';
@@ -31,6 +30,7 @@ import { GroupedCallsView } from '../components/calls/GroupedCallsView';
 import { CallsTableView } from '../components/calls/CallsTableView';
 import { callWorkspace, loadSavedWorkspace, saveWorkspace, workspaceLabel } from '../utils/workspace';
 import { ErrorBoundary } from '../components/ui/ErrorBoundary';
+import { LeapingImportButton, LeapingImportNotice, useLeapingImport } from '../components/calls/LeapingImportBar';
 
 export function CallsPage({
   db,
@@ -71,8 +71,7 @@ export function CallsPage({
   const [viewMode, setViewMode] = useState<'grouped' | 'table'>(saved.viewMode || 'grouped');
   const [groupBy, setGroupBy] = useState<GroupByMode>(saved.groupBy || 'anliegen');
   const [deleteCallId, setDeleteCallId] = useState<string | null>(null);
-  const [importingLeaping, setImportingLeaping] = useState(false);
-  const [leapingMsg, setLeapingMsg] = useState('');
+  const leaping = useLeapingImport(db, setDb);
 
   useEffect(() => {
     if (selectedCallId) setDetail(db.calls.find(c => c.id === selectedCallId) || null);
@@ -178,36 +177,6 @@ export function CallsPage({
 
   const groupByLabel = groupBy === 'anliegen' ? 'Anliegen' : 'main issue';
 
-  async function importLeaping() {
-    console.info('[leaping-import] button clicked — starting import');
-    setImportingLeaping(true);
-    setLeapingMsg('Importing Leaping calls...');
-    try {
-      const { calls: raw, db: dbAfterFetch } = await fetchLeapingCalls(db);
-      console.info('[leaping-import] fetch complete, processing', raw.length, 'calls');
-      const result = await importLeapingRawCalls(dbAfterFetch, raw);
-      console.info('[leaping-import] processing complete — imported:', result.imported, 'updated:', result.updated, 'skipped:', result.skipped);
-      setDb(result.db);
-      console.info('[leaping-import] db updated');
-      const parts = [`${result.imported} new`, `${result.updated} updated`];
-      if (result.skipped > 0) parts.push(`${result.skipped} skipped (< 50s)`);
-      const batch = db.settings.leapingImportBatchSize ?? 50;
-      setLeapingMsg(`Leaping import complete (batch ${batch}): ${parts.join(', ')}.`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('[leaping-import] failed', {
-        component: 'CallsPage.importLeaping',
-        message: msg,
-        stack: e instanceof Error ? e.stack : undefined
-      });
-      const displayMsg = msg || 'Leaping import failed.';
-      setLeapingMsg(displayMsg);
-    } finally {
-      setImportingLeaping(false);
-      console.info('[leaping-import] import flow finished');
-    }
-  }
-
   return (
     <main className="page calls-cockpit">
       <div className="page-head">
@@ -224,14 +193,7 @@ export function CallsPage({
           </p>
         </div>
         <div className="row wrap workspace-toggle">
-          <button
-            type="button"
-            className="primary"
-            onClick={importLeaping}
-            disabled={importingLeaping}
-          >
-            {importingLeaping ? 'Importing...' : `Import Leaping (${db.settings.leapingImportBatchSize ?? 50})`}
-          </button>
+          <LeapingImportButton db={db} importing={leaping.importing} onImport={() => void leaping.runImport()} />
           <button
             type="button"
             className={workspace === 'production' ? 'primary-soft' : ''}
@@ -249,16 +211,7 @@ export function CallsPage({
         </div>
       </div>
 
-      {leapingMsg && (
-        <section className="panel inline-notice">
-          <div className="row between wrap">
-            <p className="muted">{leapingMsg}</p>
-            {typeof db.leapingLastImportAt === 'string' && db.leapingLastImportAt && (
-              <span className="badge blue">Last import {db.leapingLastImportAt.slice(0, 16).replace('T', ' ')}</span>
-            )}
-          </div>
-        </section>
-      )}
+      <LeapingImportNotice message={leaping.message} lastImportAt={leaping.lastImportAt} />
 
       <section className="panel">
         <CallFiltersBar
