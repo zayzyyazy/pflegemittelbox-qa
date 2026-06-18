@@ -1,9 +1,11 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Database } from '../services/storageService';
 import type { WorkspaceNote, WorkspaceNoteKind } from '../types/WorkspaceNote';
 import { addWorkspaceNote, deleteWorkspaceNote } from '../services/workspaceNotesService';
+import { recoverArchivedNotes } from '../services/notesPersistenceService';
+import { deletePersonalNote } from '../services/personalWorkspaceService';
 import { fmtDate } from '../utils/dates';
-import { shortCallId } from '../utils/text';
+import { resolveCallByReference, shortCallId } from '../utils/text';
 import { Badge } from '../components/ui/Badge';
 
 const kinds: Array<{ key: WorkspaceNoteKind | 'all'; label: string }> = [
@@ -73,11 +75,31 @@ export function NotesPage({
   const [message, setMessage] = useState('');
   const imageInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const recovered = recoverArchivedNotes();
+    if (recovered.length > (db.workspaceNotes?.length || 0)) {
+      setDb({ ...db, workspaceNotes: recovered });
+      setMessage(`Recovered ${recovered.length} note(s) from storage.`);
+    }
+  }, []);
+
+  const legacyPersonalNotes: WorkspaceNote[] = useMemo(() => {
+    return (db.personalNotes || []).map(item => ({
+      id: `personal:${item.id}`,
+      kind: 'general',
+      title: 'Personal note',
+      note: item.text,
+      tags: ['personal'],
+      created_at: item.created_at,
+      updated_at: item.updated_at
+    }));
+  }, [db.personalNotes]);
+
   const filtered = useMemo(() => {
-    return (db.workspaceNotes || [])
+    return [...(db.workspaceNotes || []), ...legacyPersonalNotes]
       .filter(item => filterKind === 'all' || item.kind === filterKind)
       .filter(item => noteMatches(item, query));
-  }, [db.workspaceNotes, filterKind, query]);
+  }, [db.workspaceNotes, legacyPersonalNotes, filterKind, query]);
 
   async function attachImage(file?: File) {
     if (!file || !file.type.startsWith('image/')) return;
@@ -91,9 +113,9 @@ export function NotesPage({
   }
 
   function save() {
-    const hasContent = note.trim() || pastedText.trim() || image?.dataUrl;
+    const hasContent = callId.trim() || title.trim() || note.trim() || pastedText.trim() || image?.dataUrl;
     if (!hasContent) {
-      setMessage('Add a note, pasted text, or screenshot before saving.');
+      setMessage('Add a call ID, title, note, pasted text, or screenshot before saving.');
       return;
     }
     try {
@@ -101,7 +123,7 @@ export function NotesPage({
         kind,
         call_id: kind === 'prompt' || kind === 'general' ? undefined : callId,
         title,
-        note,
+        note: note || title || callId,
         pasted_text: kind === 'call' ? undefined : pastedText,
         image_data_url: kind === 'screenshot' ? image?.dataUrl : undefined,
         image_name: kind === 'screenshot' ? image?.name : undefined
@@ -119,9 +141,7 @@ export function NotesPage({
   }
 
   function findCall(noteCallId?: string) {
-    const key = noteCallId?.trim().toLowerCase();
-    if (!key) return undefined;
-    return db.calls.find(c => c.id.toLowerCase() === key || c.call_id.toLowerCase() === key);
+    return resolveCallByReference(db.calls, noteCallId);
   }
 
   return (
@@ -140,7 +160,7 @@ export function NotesPage({
           if (file) await attachImage(file);
         }}
       >
-        <div className="row wrap">
+        <div className="row wrap note-kind-tabs">
           {kinds.filter(k => k.key !== 'all').map(item => (
             <button
               type="button"
@@ -160,18 +180,13 @@ export function NotesPage({
             {kind === 'prompt' && 'Prompt / node note'}
             {kind === 'general' && 'General note'}
           </strong>
-          <p className="muted">
-            {kind === 'call' && 'Paste a call ID and write the reviewer note you want attached to that call context.'}
-            {kind === 'screenshot' && 'Attach or paste an image, optionally tie it to a call ID, then describe what matters.'}
-            {kind === 'prompt' && 'Paste prompt text, node copy, or flow logic and write what needs checking.'}
-            {kind === 'general' && 'Capture loose QA thoughts that are not tied to a specific call, screenshot, or prompt.'}
-          </p>
+          <p className="muted">Save whatever you have. A call ID, title, note, screenshot, or pasted text is enough.</p>
         </div>
 
         <div className="notes-form-grid">
           {(kind === 'call' || kind === 'screenshot') && (
             <label className="field">
-              <span>{kind === 'call' ? 'Call ID' : 'Related call ID (optional)'}</span>
+              <span>{kind === 'call' ? 'Call ID' : 'Related call ID'}</span>
               <input
                 value={callId}
                 onChange={e => setCallId(e.target.value)}
@@ -184,7 +199,7 @@ export function NotesPage({
             <input
               value={title}
               onChange={e => setTitle(e.target.value)}
-              placeholder="Short label for this note"
+              placeholder="Optional title"
             />
           </label>
           <label className="field notes-wide">
@@ -196,7 +211,7 @@ export function NotesPage({
               onChange={e => setNote(e.target.value)}
               placeholder={
                 kind === 'call'
-                  ? 'What happened in this call? What should you check later?'
+                  ? 'Optional note'
                   : kind === 'screenshot'
                     ? 'What does this screenshot show? What needs changing?'
                     : kind === 'prompt'
@@ -233,8 +248,8 @@ export function NotesPage({
               Remove screenshot
             </button>
           )}
-          <button type="button" className="primary" onClick={save}>
-            Save {kind} note
+            <button type="button" className="primary" onClick={save}>
+            Save note
           </button>
           {message && <span className="muted note-save-message">{message}</span>}
         </div>
@@ -276,15 +291,24 @@ export function NotesPage({
                     <button
                       type="button"
                       className="link-button note-call-link"
-                      onClick={() => call && openCall(call.id)}
+                      onClick={() => {
+                        const match = findCall(item.call_id);
+                        if (match) openCall(match.id);
+                      }}
                       disabled={!call}
-                      title={call ? 'Open call' : 'No matching saved call'}
+                      title={call ? `Open ${call.call_id}` : `No saved call matches "${item.call_id}"`}
                     >
-                      {shortCallId(item.call_id)}
+                      call {shortCallId(item.call_id)}
                     </button>
                   )}
                 </div>
-                <button type="button" className="btn-sm" onClick={() => setDb(deleteWorkspaceNote(db, item.id))}>
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={() => setDb(item.id.startsWith('personal:')
+                    ? deletePersonalNote(db, item.id.replace(/^personal:/, ''))
+                    : deleteWorkspaceNote(db, item.id))}
+                >
                   Delete
                 </button>
               </div>

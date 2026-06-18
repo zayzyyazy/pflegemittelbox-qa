@@ -1,10 +1,14 @@
 import type { CallReview } from '../types/CallReview';
 import type { EvidenceMoment } from '../types/EvidenceMoment';
-import type { AcousticEvent, TimingSignal } from '../types/AudioAnalysis';
+import type { AcousticEvent } from '../types/AudioAnalysis';
+import { topOperationalLabel } from './operationalFailures';
 
 const FRICTION_CUES = ['however', 'aber', 'confusion', 'verwirr', 'wiederhol', 'pause', 'problem', 'frust'];
 
 export function formatFriction(call: Partial<CallReview>, evidence: EvidenceMoment[] = []): string {
+  const ops = topOperationalLabel(call);
+  if (ops) return ops;
+
   if (call.primary_friction?.trim()) return call.primary_friction.trim();
 
   const audioHeard = evidence

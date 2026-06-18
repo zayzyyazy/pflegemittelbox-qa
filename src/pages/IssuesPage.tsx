@@ -12,13 +12,15 @@ export function IssuesPage({
   setDb,
   selectedIssueId,
   clearSelected,
-  openCall
+  openCall,
+  openCallsForIssue
 }: {
   db: Database;
   setDb: (db: Database) => void;
   selectedIssueId?: string;
   clearSelected: () => void;
   openCall?: (id: string, evidenceId?: string) => void;
+  openCallsForIssue?: (issueId: string) => void;
 }) {
   const [local, setLocal] = useState<Issue | null>(null);
   const selected = selectedIssueId ? db.issues.find(i => i.id === selectedIssueId) || null : local;
@@ -57,7 +59,14 @@ export function IssuesPage({
         </section>
       )}
       {selected && (
-        <IssueDetail issue={selected} db={db} setDb={setDb} onClose={() => { setLocal(null); clearSelected(); }} openCall={openCall} />
+        <IssueDetail
+          issue={selected}
+          db={db}
+          setDb={setDb}
+          onClose={() => { setLocal(null); clearSelected(); }}
+          openCall={openCall}
+          openCallsForIssue={openCallsForIssue}
+        />
       )}
     </main>
   );
@@ -105,13 +114,15 @@ function IssueDetail({
   db,
   setDb,
   onClose,
-  openCall
+  openCall,
+  openCallsForIssue
 }: {
   issue: Issue;
   db: Database;
   setDb: (db: Database) => void;
   onClose: () => void;
   openCall?: (id: string, evidenceId?: string) => void;
+  openCallsForIssue?: (issueId: string) => void;
 }) {
   const [draft, setDraft] = useState(issue);
   const evidence = db.evidence.filter(e => e.issue_id === issue.id || issue.linked_evidence_ids?.includes(e.id));
@@ -126,17 +137,28 @@ function IssueDetail({
           <label className="field"><span>Status</span><select value={draft.status} onChange={e => setDraft({ ...draft, status: e.target.value as Issue['status'] })}><option>active</option><option>investigating</option><option>testing</option><option>resolved</option></select></label>
           <label className="field"><span>Description</span><textarea value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} /></label>
           <label className="field"><span>Suggested fix</span><textarea value={draft.suggested_fix} onChange={e => setDraft({ ...draft, suggested_fix: e.target.value })} /></label>
-          <button type="button" className="primary" onClick={() => setDb(upsertIssue(db, draft))}>Save issue</button>
+          <button type="button" className="primary btn-inline" onClick={() => setDb(upsertIssue(db, draft))}>Save issue</button>
         </section>
         <section>
-          <h3>Linked calls ({calls.length})</h3>
+          <div className="row between wrap">
+            <h3>Linked calls ({calls.length})</h3>
+            {openCallsForIssue && calls.length > 0 && (
+              <button type="button" className="btn-sm primary-soft" onClick={() => { openCallsForIssue(issue.id); onClose(); }}>
+                View all in Calls
+              </button>
+            )}
+          </div>
           {calls.map(c => (
-            <div className="mini" key={c.id}>
-              <button type="button" className="link-button" onClick={() => openCall?.(c.id)}>{shortCallId(c.call_id)}</button>
+            <div className="mini issue-linked-call" key={c.id}>
+              <div className="row between wrap">
+                <button type="button" className="link-button" onClick={() => openCall?.(c.id)}>{shortCallId(c.call_id)}</button>
+                <span className="badge neutral">{c.solved_status}</span>
+              </div>
               <p>{c.call_summary}</p>
             </div>
           ))}
           <h3>Evidence moments</h3>
+          <div className="issue-detail-evidence">
           {evidence.map(e => (
             <div className="evidence" key={e.id}>
               <Badge tone={e.severity === 'high' ? 'red' : 'yellow'}>{e.moment_type.replace(/_/g, ' ')}</Badge>
@@ -148,6 +170,7 @@ function IssueDetail({
               )}
             </div>
           ))}
+          </div>
           <div className="row wrap">
             <button type="button" onClick={() => setDb(setIssueStatus(db, issue.id, 'testing'))}>Mark testing</button>
             <button type="button" onClick={() => setDb(setIssueStatus(db, issue.id, 'resolved'))}>Resolve</button>

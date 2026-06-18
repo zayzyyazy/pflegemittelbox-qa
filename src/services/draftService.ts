@@ -8,6 +8,16 @@ import { resolveEvidenceForSave } from '../utils/evidenceReview';
 import { upsertCall } from './callsService';
 import { replaceEvidenceForCall } from './evidenceService';
 import { finalizeDatabaseState } from './issuePatternService';
+import { deleteStoredAudio } from './audioStorageService';
+
+/** Clear inbox drafts immediately; audio cleanup runs in background. */
+export function clearInboxQueue(db: Database): Database {
+  const drafts = db.drafts || [];
+  if (drafts.length) {
+    void Promise.all(drafts.map(d => deleteStoredAudio(d.call).catch(() => undefined)));
+  }
+  return { ...db, drafts: [] };
+}
 
 export function upsertDraft(db: Database, draft: Partial<DraftCall>): Database {
   const now = nowIso();
@@ -87,7 +97,9 @@ export function saveDraftAsCall(
     review_status: linked.length ? 'flagged' : 'reviewed',
     updated_at: now,
     created_at: draft.call.created_at || now,
-    needs_review: false
+    workspace: callPatch?.workspace ?? draft.call.workspace ?? 'production',
+    bot_version: callPatch?.bot_version ?? draft.call.bot_version ?? 'production',
+    needs_review: !!callPatch?.needs_review || !!draft.call.needs_review
   } as CallReview;
 
   const evidence = resolveEvidenceForSave(evidencePatch || draft.evidence).map(e => ({

@@ -6,6 +6,7 @@ import { analysisOrchestrator } from './analysisOrchestrator';
 import { transcribeAudioDetailed } from './openaiService';
 import { upsertDraft, updateDraft } from './draftService';
 import { findDuplicate } from './duplicateService';
+import { applyExplorationVerdict, buildExplorationContext } from '../utils/explorationBrief';
 import { cleanCallIdFromFilename, id } from '../utils/text';
 
 const AUDIO_EXT = /\.(wav|mp3|m4a|webm|ogg)$/i;
@@ -44,10 +45,16 @@ export async function processDraftRecording(
   draftId: string,
   file: File,
   onUpdate: (db: Database) => void,
-  opts?: { workspace?: CallReview['workspace']; botVersion?: CallReview['bot_version'] }
+  opts?: {
+    workspace?: CallReview['workspace'];
+    botVersion?: CallReview['bot_version'];
+    explorationBrief?: string;
+    shouldAbort?: () => boolean;
+  }
 ): Promise<void> {
   const draft = (db.drafts || []).find(d => d.id === draftId);
   if (!draft) return;
+  const abort = () => opts?.shouldAbort?.() ?? false;
 
   const callId = draft.call.id || id('call');
   let working = updateDraft(db, draftId, {
@@ -57,6 +64,7 @@ export async function processDraftRecording(
   onUpdate(working);
 
   try {
+    if (abort()) return;
     let audioFields;
     try {
       audioFields = await attachAudioToCall(callId, file);
@@ -70,6 +78,7 @@ export async function processDraftRecording(
     });
     onUpdate(working);
 
+    if (abort()) return;
     const transcribed = await transcribeAudioDetailed(working.settings, file);
     working = updateDraft(working, draftId, {
       transcript: transcribed.text,
@@ -85,6 +94,10 @@ export async function processDraftRecording(
     });
     onUpdate(working);
 
+    if (abort()) return;
+    const explorationBrief = opts?.explorationBrief?.trim() || draft.exploration_brief?.trim() || '';
+    const explorationContext = buildExplorationContext(explorationBrief);
+
     const { call, evidence } = await analysisOrchestrator.analyzeCall({
       settings: working.settings,
       transcript: transcribed.text,
@@ -93,11 +106,18 @@ export async function processDraftRecording(
       existingCallId: callId,
       workspace: opts?.workspace,
       botVersion: opts?.botVersion,
+      reviewerContext: explorationContext || undefined,
       onStep: step => {
+        if (abort()) return;
         working = updateDraft(working, draftId, { processing_step: step });
         onUpdate(working);
       }
     });
+
+    if (abort()) return;
+    const currentDraft = working.drafts!.find(d => d.id === draftId)!;
+    const targetWorkspace = opts?.workspace ?? currentDraft.call.workspace ?? 'production';
+    const targetBotVersion = opts?.botVersion ?? currentDraft.call.bot_version ?? 'production';
 
     const mergedCall = {
       ...call,
@@ -108,8 +128,8 @@ export async function processDraftRecording(
       transcript_segments: transcribed.segments,
       transcript_words: transcribed.words,
       transcription_model: transcribed.transcription_model,
-      workspace: opts?.workspace || call.workspace || 'production',
-      bot_version: opts?.botVersion || call.bot_version || 'production'
+      workspace: targetWorkspace,
+      bot_version: targetBotVersion
     };
     if (import.meta.env.DEV && mergedCall.review_object) {
       console.info('[review_object]', mergedCall.call_id, mergedCall.review_object);
@@ -117,10 +137,15 @@ export async function processDraftRecording(
 
     const dup = findDuplicate(mergedCall as any, working.calls);
 
+    if (explorationBrief) {
+      Object.assign(mergedCall, applyExplorationVerdict(mergedCall, explorationBrief));
+    }
+
     working = updateDraft(working, draftId, {
       status: 'ready',
       processing_step: undefined,
       duplicate_warning: !!dup,
+      exploration_brief: explorationBrief || undefined,
       call: mergedCall,
       evidence,
       error: dup ? `Possible duplicate of ${dup.call.call_id}` : undefined

@@ -272,6 +272,10 @@ export function buildAllowEvidenceFlags(u: CallUnderstanding): Record<EvidenceMo
     unresolved_request:
       !u.request_completed && u.workflow_failed && !u.human_transfer_explicit,
     escalation: u.human_transfer_explicit,
+    missing_function_call: u.workflow_failed && !u.request_completed,
+    function_argument_mismatch: u.workflow_failed,
+    claimed_completion_without_execution: u.workflow_failed && !u.request_completed,
+    avoidable_transfer: u.human_transfer_explicit && !u.request_completed,
     product_availability: false,
     missing_integration: u.workflow_failed && !u.request_completed,
     manual_highlight: true,

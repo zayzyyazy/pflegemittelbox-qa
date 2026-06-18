@@ -11,6 +11,7 @@ export interface DraftCall {
   error?: string;
   duplicate_warning?: boolean;
   import_batch_id?: string;
+  exploration_brief?: string;
   transcript?: string;
   call: Partial<CallReview>;
   evidence: Partial<EvidenceMoment>[];

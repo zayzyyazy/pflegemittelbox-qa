@@ -44,7 +44,11 @@ function dimensionFromEvidence(ev: Partial<EvidenceMoment>): ReviewFindingDimens
     ev.moment_type === 'repeated_authentication' ||
     ev.moment_type === 'missing_alternative_verification' ||
     ev.moment_type === 'wrong_workflow' ||
-    ev.moment_type === 'missing_integration'
+    ev.moment_type === 'missing_integration' ||
+    ev.moment_type === 'missing_function_call' ||
+    ev.moment_type === 'function_argument_mismatch' ||
+    ev.moment_type === 'claimed_completion_without_execution' ||
+    ev.moment_type === 'avoidable_transfer'
   ) {
     return 'qa_process';
   }

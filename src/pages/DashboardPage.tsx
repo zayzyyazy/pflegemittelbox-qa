@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { Database } from '../services/storageService';
 import type { CallReview } from '../types/CallReview';
 import type { EvidenceMoment } from '../types/EvidenceMoment';
-import { activeIssues, highSeverity, requestCounts } from '../utils/metrics';
+import { activeIssues, requestCounts } from '../utils/metrics';
 import { anliegenLabels } from '../utils/anliegen';
 import { fmtDate } from '../utils/dates';
 import { Badge } from '../components/ui/Badge';
@@ -11,31 +11,23 @@ import { topPatternThreads } from '../services/patternMemoryService';
 import { shortCallId } from '../utils/text';
 import { PinnedCallsStrip } from '../components/calls/PinnedCallsStrip';
 import { callWorkspace } from '../utils/workspace';
+import { hasHighSeverityOperationalFailure, topOperationalLabel } from '../utils/operationalFailures';
 import {
   addPersonalNote,
   addPersonalTask,
   updatePersonalTask
 } from '../services/personalWorkspaceService';
 
-function reviewCandidateCount(call: CallReview, evidence: EvidenceMoment[]) {
-  return call.review_object?.dashboard_signals.unresolved_candidate_count ||
-    evidence.filter(e => e.call_id === call.id && e.reviewer_status === 'pending').length;
-}
-
-function reviewHighCount(call: CallReview, evidence: EvidenceMoment[]) {
-  return call.review_object?.dashboard_signals.high_severity_count ||
-    evidence.filter(e => e.call_id === call.id && e.severity === 'high' && e.reviewer_status !== 'dismissed').length;
-}
-
 function findOpenFindings(db: Database) {
   return db.calls
     .map(call => ({
       call,
-      candidates: reviewCandidateCount(call, db.evidence),
-      high: reviewHighCount(call, db.evidence)
+      ops: hasHighSeverityOperationalFailure(call),
+      label: topOperationalLabel(call),
+      pending: db.evidence.filter(e => e.call_id === call.id && e.reviewer_status === 'pending').length
     }))
-    .filter(row => row.candidates > 0 || row.high > 0)
-    .sort((a, b) => b.high - a.high || b.candidates - a.candidates);
+    .filter(row => row.ops || row.pending > 0)
+    .sort((a, b) => Number(b.ops) - Number(a.ops) || b.pending - a.pending);
 }
 
 function miniQueueCard({
@@ -70,7 +62,8 @@ export function DashboardPage({
   openIssue: (id: string) => void;
   openCall: (id: string, evidenceId?: string) => void;
 }) {
-  const [ask, setAsk] = useState(true);
+  const [ask, setAsk] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const [taskText, setTaskText] = useState('');
   const [noteText, setNoteText] = useState('');
 
@@ -89,8 +82,11 @@ export function DashboardPage({
     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
     .slice(0, 5);
 
-  const findingRows = useMemo(() => findOpenFindings(db).slice(0, 6), [db]);
-  const openFindingCount = findingRows.reduce((sum, row) => sum + row.candidates + row.high, 0);
+  const findingRows = useMemo(() => findOpenFindings(db).slice(0, 8), [db]);
+  const pinnedCritical = useMemo(
+    () => productionCalls.filter(c => c.pinned || c.critical || hasHighSeverityOperationalFailure(c)).slice(0, 8),
+    [productionCalls]
+  );
   const topTrendTags = useMemo(() => {
     const counts = new Map<string, number>();
     for (const call of db.calls) {
@@ -117,7 +113,7 @@ export function DashboardPage({
       <div className="page-head">
         <div>
           <h1>Dashboard</h1>
-          <p>QA command center — queues, findings, pinned work, reminders, and project-wide AI.</p>
+          <p>QA command center — what needs review now.</p>
         </div>
         <button type="button" className="primary" onClick={() => setAsk(!ask)}>
           {ask ? 'Hide Ask AI' : 'Ask AI'}
@@ -125,12 +121,24 @@ export function DashboardPage({
       </div>
 
       <section className="queue-grid">
+        {miniQueueCard({ label: 'Pinned / critical', count: pinnedCritical.length, tone: 'red' })}
+        {miniQueueCard({ label: 'Needs review', count: findingRows.length, tone: 'yellow' })}
         {miniQueueCard({ label: 'Processing', count: processing.length, tone: 'blue', onClick: openInbox })}
-        {miniQueueCard({ label: 'Failed imports', count: failed.length, tone: failed.length ? 'red' : undefined, onClick: openInbox })}
         {miniQueueCard({ label: 'Ready for review', count: ready.length, tone: ready.length ? 'yellow' : undefined, onClick: openInbox })}
-        {miniQueueCard({ label: 'High severity', count: highSeverity(db.issues, db.evidence), tone: 'red' })}
-        {miniQueueCard({ label: 'Open findings', count: openFindingCount, tone: 'yellow' })}
+        {miniQueueCard({ label: 'Failed imports', count: failed.length, tone: failed.length ? 'red' : undefined, onClick: openInbox })}
       </section>
+
+      {!!pinnedCritical.length && (
+        <section className="panel dashboard-pinned-panel">
+          <h2>Pinned — check these first</h2>
+          <PinnedCallsStrip
+            calls={pinnedCritical}
+            evidence={db.evidence}
+            experiments={db.experiments}
+            onOpen={c => openCall(c.id)}
+          />
+        </section>
+      )}
 
       {ask && <AskAiPanel db={db} setDb={setDb} />}
 
@@ -142,14 +150,14 @@ export function DashboardPage({
           </div>
           {findingRows.length ? (
             <div className="attention-list">
-              {findingRows.map(({ call, candidates, high }) => (
+              {findingRows.map(({ call, ops, label, pending }) => (
                 <button type="button" className="attention-row" key={call.id} onClick={() => openCall(call.id)}>
                   <div>
                     <strong>{shortCallId(call.call_id)}</strong>
-                    <p>{call.call_summary || call.original_intent_summary || 'No summary yet.'}</p>
+                    <p>{label || call.call_summary || call.original_intent_summary || 'No summary yet.'}</p>
                   </div>
-                  <span className="badge yellow">{candidates} candidates</span>
-                  {high > 0 && <span className="badge red">{high} high</span>}
+                  {ops && <span className="badge red">ops failure</span>}
+                  {pending > 0 && <span className="badge yellow">{pending} pending</span>}
                 </button>
               ))}
             </div>
@@ -170,6 +178,14 @@ export function DashboardPage({
         </div>
       </section>
 
+      <div className="dashboard-more-toggle">
+        <button type="button" className="btn-sm" onClick={() => setShowMore(v => !v)}>
+          {showMore ? 'Hide more' : 'Show trends, pinned work, and reminders'}
+        </button>
+      </div>
+
+      {showMore && (
+      <>
       <section className="grid dashboard-grid">
         <div className="panel">
           <h2>Trends over time</h2>
@@ -295,6 +311,8 @@ export function DashboardPage({
           </div>
         </div>
       </section>
+      </>
+      )}
     </main>
   );
 }

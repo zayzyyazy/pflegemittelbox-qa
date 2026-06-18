@@ -18,9 +18,41 @@ import { deriveMainIssue } from '../utils/issueLabels';
 import { normalizeMomentType } from '../utils/transcriptHeuristics';
 import { normalizeCallerRequest } from '../utils/filterNormalize';
 import { callWorkspace } from '../utils/workspace';
+import { buildMarieOperationTrace } from '../utils/marieOperationTrace';
+import { refreshCallSystemEvidence } from './leapingImportService';
+import { hydrateNotesFromMainDb, recoverArchivedNotes, savePersistedNotes } from './notesPersistenceService';
+import {
+  databaseFileKb,
+  diskDatabaseEnabled,
+  loadDatabaseJsonFromDisk,
+  saveDatabaseJsonToDisk
+} from './diskDatabaseService';
 
 function isValidSolvedStatus(value: unknown): value is SolvedStatus {
   return value === 'yes' || value === 'partially' || value === 'no';
+}
+
+function finiteNumber(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && Number.isFinite(Number(value))) return Number(value);
+  return 0;
+}
+
+function correctedLeapingDuration(call: Partial<CallReview>): number | undefined {
+  const metadata = call.raw_metadata || {};
+  const endFields = metadata.end_fields && typeof metadata.end_fields === 'object' && !Array.isArray(metadata.end_fields)
+    ? metadata.end_fields as Record<string, unknown>
+    : {};
+  const results = metadata.results && typeof metadata.results === 'object' && !Array.isArray(metadata.results)
+    ? metadata.results as Record<string, unknown>
+    : {};
+  const preferred =
+    finiteNumber(results.leaping_duration_seconds) ||
+    finiteNumber(results.duration_sec) ||
+    finiteNumber(endFields.leaping_call_duration) ||
+    finiteNumber(endFields.leaping_duration_seconds);
+  if (!preferred) return undefined;
+  return Math.round(preferred);
 }
 
 export type AnalysisStrictness = 'standard' | 'strict' | 'lenient';
@@ -45,10 +77,17 @@ export interface Settings {
   leapingUsername: string;
   leapingPassword: string;
   leapingApiKey: string;
+  leapingRefreshUrl?: string;
+  /** How many calls to request per API page (overrides limit= in Calls API URL). */
+  leapingImportLimit?: number;
+  /** Safety cap on paginated fetch rounds. */
+  leapingImportMaxPages?: number;
   leapingAccessToken?: string;
   leapingRefreshToken?: string;
   leapingTokenExpiresAt?: string;
   dbRecoveryNotice?: string;
+  /** What the reviewer is testing in the next import batch (e.g. ticket/email gaps). */
+  importExplorationBrief?: string;
 }
 
 export interface Database {
@@ -91,7 +130,10 @@ export const defaultSettings: Settings = {
   leapingLoginUrl: 'https://api.leaping.ai/v1/auth/login',
   leapingUsername: '',
   leapingPassword: '',
-  leapingApiKey: ''
+  leapingApiKey: '',
+  leapingRefreshUrl: 'https://api.leaping.ai/v1/auth/refresh',
+  leapingImportLimit: 200,
+  leapingImportMaxPages: 20
 };
 
 function emptyDatabase(): Database {
@@ -172,7 +214,7 @@ export function migrateDatabase(parsed: Partial<Database>): Database {
     insights: parsed.insights || [],
     personalTasks: parsed.personalTasks || [],
     personalNotes: parsed.personalNotes || [],
-    workspaceNotes: parsed.workspaceNotes || [],
+    workspaceNotes: hydrateNotesFromMainDb(parsed.workspaceNotes),
     leapingRawCalls: parsed.leapingRawCalls || [],
     leapingLastImportAt: parsed.leapingLastImportAt
   };
@@ -203,12 +245,34 @@ export function migrateDatabase(parsed: Partial<Database>): Database {
     const synced = syncCallFlagsFromEvidence({ ...call, anliegen, solved_status }, ev);
     const ratings = computeRatings(synced as CallReview, ev);
     const primary_issue_label = deriveMainIssue(synced, ev);
-    return { ...synced, ...ratings, primary_issue_label } as CallReview;
+    const withTrace = {
+      ...synced,
+      ...ratings,
+      duration_seconds: correctedLeapingDuration(synced) ?? synced.duration_seconds,
+      primary_issue_label
+    } as CallReview;
+    return {
+      ...withTrace,
+      operation_trace: withTrace.operation_trace || buildMarieOperationTrace(withTrace)
+    } as CallReview;
   });
   db.evidence = (parsed.evidence || seed.evidence).map((e: EvidenceMoment) => ({
     ...e,
     moment_type: normalizeMomentType(String(e.moment_type || 'other'))
   }));
+
+  const refreshed: EvidenceMoment[] = [];
+  for (const call of db.calls) {
+    if (!call.leaping_call_id && !(call.function_calls?.length)) {
+      refreshed.push(...db.evidence.filter(e => e.call_id === call.id));
+      continue;
+    }
+    const callEv = db.evidence.filter(e => e.call_id === call.id);
+    const withTrace = { ...call, operation_trace: call.operation_trace || buildMarieOperationTrace(call) };
+    refreshed.push(...refreshCallSystemEvidence(withTrace, callEv));
+  }
+  db.evidence = refreshed;
+
   db.drafts = (parsed.drafts || []).map((d: DraftCall) =>
     d.status === 'processing'
       ? { ...d, status: 'failed' as const, error: 'Import interrupted — open draft and reanalyze', processing_step: undefined }
@@ -237,28 +301,264 @@ function tryMigrateLegacy(): Database | null {
   }
 }
 
-export const loadDb = (): Database => {
+export const loadDb = (): Database => loadDbFromLocalStorage(recoverArchivedNotes());
+
+function loadDbFromLocalStorage(recoveredNotes: WorkspaceNote[]): Database {
   try {
     const raw = localStorage.getItem(DB_KEY);
-    if (raw) return migrateDatabase(JSON.parse(raw));
+    if (raw) {
+      const db = migrateDatabase(JSON.parse(raw));
+      const notes = hydrateNotesFromMainDb(db.workspaceNotes?.length ? db.workspaceNotes : recoveredNotes);
+      return { ...db, workspaceNotes: notes };
+    }
     const legacy = tryMigrateLegacy();
-    if (legacy) return legacy;
+    if (legacy) {
+      const notes = hydrateNotesFromMainDb(legacy.workspaceNotes?.length ? legacy.workspaceNotes : recoveredNotes);
+      return { ...legacy, workspaceNotes: notes };
+    }
   } catch {
     const db = seedDatabase();
     db.settings = {
       ...db.settings,
       dbRecoveryNotice:
-        'Your local database could not be loaded — demo data was restored. Export regularly from Settings.'
+        'Your local database could not be loaded — demo data was restored. Notes were recovered where possible.'
     };
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
+    db.workspaceNotes = recoveredNotes;
     return db;
   }
   const db = seedDatabase();
-  localStorage.setItem(DB_KEY, JSON.stringify(db));
+  db.workspaceNotes = recoveredNotes;
   return db;
-};
+}
 
-export const saveDb = (db: Database) => localStorage.setItem(DB_KEY, JSON.stringify(db));
+/** Desktop: load from disk file (unlimited). Migrates localStorage → disk on first launch. */
+export async function loadDbAsync(): Promise<Database> {
+  const recoveredNotes = recoverArchivedNotes();
+
+  if (diskDatabaseEnabled()) {
+    const fromDisk = await loadDatabaseJsonFromDisk();
+    if (fromDisk) {
+      try {
+        const db = migrateDatabase(JSON.parse(fromDisk));
+        const notes = hydrateNotesFromMainDb(db.workspaceNotes?.length ? db.workspaceNotes : recoveredNotes);
+        return { ...db, workspaceNotes: notes };
+      } catch (e) {
+        console.error('[pflegemittelbox] disk db parse failed, falling back', e);
+      }
+    }
+    const fromLocal = loadDbFromLocalStorage(recoveredNotes);
+    await saveDbWithRecoveryAsync(fromLocal);
+    return fromLocal;
+  }
+
+  return loadDbFromLocalStorage(recoveredNotes);
+}
+
+function slimCallForDisk(call: CallReview): CallReview {
+  const events = call.leaping_transcript_events;
+  const meta = call.raw_metadata as Record<string, unknown> | undefined;
+  return {
+    ...call,
+    transcript_words: undefined,
+    review_object: undefined,
+    leaping_transcript_events: events && events.length > 120 ? events.slice(0, 120) : events,
+    raw_metadata: meta
+      ? {
+          end_fields: meta.end_fields,
+          failed_stage: meta.failed_stage,
+          success: meta.success
+        }
+      : undefined
+  };
+}
+
+function slimDatabaseForDisk(db: Database): Database {
+  return {
+    ...db,
+    workspaceNotes: [],
+    leapingRawCalls: [],
+    drafts: db.drafts || [],
+    calls: db.calls.map(slimCallForDisk)
+  };
+}
+
+function slimCallForStorage(call: CallReview, aggressive = false): CallReview {
+  const events = call.leaping_transcript_events;
+  const meta = call.raw_metadata as Record<string, unknown> | undefined;
+  const slimEvents = aggressive ? undefined : events && events.length > 20 ? events.slice(0, 20) : events;
+  return {
+    ...call,
+    transcript_words: undefined,
+    review_object: aggressive ? undefined : call.review_object,
+    leaping_transcript_events: slimEvents,
+    transcript_segments: call.transcript_segments?.map(s => ({ start: s.start, end: s.end, text: s.text, speaker: s.speaker })),
+    function_calls: call.function_calls?.map(f => ({
+      name: f.name,
+      status: f.status,
+      timestamp_seconds: f.timestamp_seconds
+    })),
+    raw_metadata: meta
+      ? {
+          end_fields: meta.end_fields,
+          failed_stage: meta.failed_stage,
+          success: meta.success
+        }
+      : undefined
+  };
+}
+
+function slimDraftForStorage(draft: DraftCall, aggressive = false): DraftCall {
+  return {
+    ...draft,
+    transcript: aggressive ? undefined : draft.transcript?.slice(0, 8000),
+    call: {
+      ...draft.call,
+      transcript_words: undefined,
+      transcript_segments: draft.call.transcript_segments?.slice(0, 60).map(s => ({
+        start: s.start,
+        end: s.end,
+        text: s.text,
+        speaker: s.speaker
+      }))
+    }
+  };
+}
+
+function slimDatabaseForStorage(db: Database, aggressive = false): Database {
+  return {
+    ...db,
+    workspaceNotes: [],
+    leapingRawCalls: [],
+    drafts: (db.drafts || []).map(d => slimDraftForStorage(d, aggressive)),
+    calls: db.calls.map(c => slimCallForStorage(c, aggressive))
+  };
+}
+
+function tryPersistMain(db: Database, aggressive = false): boolean {
+  try {
+    localStorage.setItem(DB_KEY, JSON.stringify(slimDatabaseForStorage(db, aggressive)));
+    return true;
+  } catch (e) {
+    console.error('[pflegemittelbox] main db save failed', e);
+    return false;
+  }
+}
+
+export type SaveResult = { mainOk: boolean; notesOk: boolean; recovered?: boolean; onDisk?: boolean };
+
+export async function saveDbWithRecoveryAsync(db: Database): Promise<SaveResult> {
+  let notesOk = true;
+  if (db.workspaceNotes?.length) {
+    notesOk = savePersistedNotes(db.workspaceNotes);
+  }
+
+  if (diskDatabaseEnabled()) {
+    const diskOk = await saveDatabaseJsonToDisk(JSON.stringify(slimDatabaseForDisk(db)));
+    if (diskOk) {
+      try {
+        localStorage.removeItem(DB_KEY);
+      } catch {
+        // ignore
+      }
+      return { mainOk: true, notesOk, onDisk: true };
+    }
+  }
+
+  if (tryPersistMain(db, false)) return { mainOk: true, notesOk, onDisk: false };
+  if (tryPersistMain(db, true)) return { mainOk: true, notesOk, recovered: true, onDisk: false };
+  return { mainOk: false, notesOk, onDisk: false };
+}
+
+export function saveDb(db: Database): SaveResult {
+  return saveDbWithRecovery(db);
+}
+
+export function saveDbWithRecovery(db: Database): SaveResult {
+  let notesOk = true;
+  if (db.workspaceNotes?.length) {
+    notesOk = savePersistedNotes(db.workspaceNotes);
+  }
+  if (tryPersistMain(db, false)) return { mainOk: true, notesOk };
+  if (tryPersistMain(db, true)) return { mainOk: true, notesOk, recovered: true };
+  return { mainOk: false, notesOk };
+}
+
+export function estimateStorageKb(): {
+  mainKb: number;
+  notesKb: number;
+  audioKb: number;
+  diskKb: number;
+  totalKb: number;
+  onDisk: boolean;
+} {
+  let mainKb = 0;
+  let notesKb = 0;
+  let audioKb = 0;
+  const onDisk = diskDatabaseEnabled();
+  try {
+    mainKb = Math.round((localStorage.getItem(DB_KEY)?.length || 0) / 1024);
+    notesKb = Math.round(
+      ((localStorage.getItem('pflegemittelbox-qa-notes-v1')?.length || 0) +
+        (localStorage.getItem('pflegemittelbox-qa-note-images-v1')?.length || 0)) /
+        1024
+    );
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('ai-call-qa-audio-v1:')) {
+        audioKb += Math.round((localStorage.getItem(key)?.length || 0) / 1024);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { mainKb, notesKb, audioKb, diskKb: 0, totalKb: mainKb + notesKb + audioKb, onDisk };
+}
+
+export async function estimateStorageKbAsync(): Promise<{
+  mainKb: number;
+  notesKb: number;
+  audioKb: number;
+  diskKb: number;
+  totalKb: number;
+  onDisk: boolean;
+}> {
+  const base = estimateStorageKb();
+  if (!diskDatabaseEnabled()) return base;
+  const diskKb = await databaseFileKb();
+  return {
+    ...base,
+    diskKb,
+    onDisk: diskKb > 0,
+    totalKb: diskKb > 0 ? diskKb + base.notesKb + base.audioKb : base.totalKb
+  };
+}
+
+/** Drop heavy payloads. On desktop, rewrites the disk database file. */
+export function compactStoredDatabase(db: Database): Database {
+  const slimmed = slimDatabaseForStorage(db, true);
+  void saveDbWithRecoveryAsync({ ...db, leapingRawCalls: [], drafts: slimmed.drafts, calls: slimmed.calls });
+  return {
+    ...db,
+    leapingRawCalls: [],
+    drafts: slimmed.drafts,
+    calls: slimmed.calls
+  };
+}
+
+/** Remove all saved calls, drafts, and evidence. Keeps settings, notes, and issues. */
+export function clearAllCallsAndDrafts(db: Database): Database {
+  const next = finalizeDatabaseState({
+    ...db,
+    calls: [],
+    drafts: [],
+    evidence: [],
+    leapingRawCalls: [],
+    issues: db.issues.map(i => ({ ...i, linked_call_ids: [] })),
+    experiments: db.experiments.map(e => ({ ...e, related_call_ids: [] }))
+  });
+  void saveDbWithRecoveryAsync(next);
+  return next;
+}
 
 export const clearDb = () => {
   const db = emptyDatabase();

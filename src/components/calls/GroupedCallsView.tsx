@@ -6,6 +6,7 @@ import { groupStats } from '../../utils/callGrouping';
 import { shortCallId } from '../../utils/text';
 import { CallerRequestTag } from './CallerRequestTag';
 import { ResultPill } from './ResultPill';
+import { topOperationalLabel } from '../../utils/operationalFailures';
 
 function CompactCallCard({
   call,
@@ -17,6 +18,7 @@ function CompactCallCard({
   onOpen: (c: CallReview) => void;
 }) {
   const issueCount = call.linked_issue_ids?.length ?? 0;
+  const opsLabel = topOperationalLabel(call);
   return (
     <article className="compact-call-card library-row" onClick={() => onOpen(call)} role="button" tabIndex={0}
       onKeyDown={e => { if (e.key === 'Enter') onOpen(call); }}>
@@ -27,6 +29,7 @@ function CompactCallCard({
       <div className="row wrap library-meta">
         <CallerRequestTag category={call.anliegen} />
         <ResultPill status={call.solved_status} />
+        {opsLabel && <span className="ops-flag">{opsLabel}</span>}
         {evidence.length > 0 && <span className="badge yellow">{evidence.length} finding{evidence.length !== 1 ? 's' : ''}</span>}
         {issueCount > 0 && <span className="badge red">{issueCount} issue{issueCount !== 1 ? 's' : ''}</span>}
         {call.review_status === 'flagged' && <span className="badge red">flagged</span>}

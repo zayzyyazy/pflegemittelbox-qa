@@ -3,6 +3,7 @@ import type { Database } from '../../services/storageService';
 import type { CallReview } from '../../types/CallReview';
 import { id } from '../../utils/text';
 import { upsertDraft } from '../../services/draftService';
+import { currentImportGeneration, isImportCancelled } from '../../services/importCancel';
 import {
   filterRecordingFiles,
   processDraftRecording
@@ -23,11 +24,18 @@ export function ImportRecordingsPanel({
 }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
+  const [explorationBrief, setExplorationBrief] = useState(db.settings.importExplorationBrief || '');
   const filesRef = useRef<Map<string, File>>(new Map());
   const dbRef = useRef(db);
+
   useEffect(() => {
     dbRef.current = db;
   }, [db]);
+
+  function persistExplorationBrief(value: string) {
+    setExplorationBrief(value);
+    setDb({ ...dbRef.current, settings: { ...dbRef.current.settings, importExplorationBrief: value } });
+  }
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) return;
@@ -41,14 +49,18 @@ export function ImportRecordingsPanel({
       return;
     }
 
+    const runToken = currentImportGeneration();
+
     setBusy(true);
     setStatus(`Importing ${accepted.length} file(s)...`);
 
     const importBatchId = `batch-${Date.now()}`;
+    const brief = explorationBrief.trim();
     let working = dbRef.current;
     const newDraftIds: string[] = [];
 
     for (const file of accepted) {
+      if (isImportCancelled(runToken)) break;
       const draftId = id('draft');
       const callId = id('call');
       filesRef.current.set(draftId, file);
@@ -58,15 +70,25 @@ export function ImportRecordingsPanel({
         file_name: file.name,
         processing_step: 'Queued',
         import_batch_id: importBatchId,
-        call: { id: callId, call_id: file.name.replace(/\.[^.]+$/, ''), audio_file_name: file.name },
+        exploration_brief: brief || undefined,
+        call: {
+          id: callId,
+          call_id: file.name.replace(/\.[^.]+$/, ''),
+          audio_file_name: file.name,
+          workspace,
+          bot_version: defaultBotVersion
+        },
         evidence: []
       });
       newDraftIds.push(draftId);
     }
 
-    setDb(working);
+    if (!isImportCancelled(runToken)) {
+      setDb(working);
+    }
 
     for (const draftId of newDraftIds) {
+      if (isImportCancelled(runToken)) break;
       const file = filesRef.current.get(draftId);
       if (!file) continue;
       setStatus(`Processing ${file.name}...`);
@@ -75,16 +97,27 @@ export function ImportRecordingsPanel({
         draftId,
         file,
         updated => {
+          const cancelled = isImportCancelled(runToken);
+          if (cancelled) return;
           working = updated;
           dbRef.current = updated;
           setDb(updated);
         },
-        { workspace, botVersion: defaultBotVersion }
+        {
+          workspace,
+          botVersion: defaultBotVersion,
+          explorationBrief: brief,
+          shouldAbort: () => isImportCancelled(runToken)
+        }
       );
     }
 
     filesRef.current.clear();
     setBusy(false);
+    if (isImportCancelled(runToken)) {
+      setStatus('Import cancelled.');
+      return;
+    }
     setStatus(`Done — ${newDraftIds.length} draft(s) in Needs Review.`);
     onClose?.();
   }
@@ -95,6 +128,20 @@ export function ImportRecordingsPanel({
       <p className="muted">
         Select audio files or a folder. Each file is copied to app storage, transcribed, and analyzed as a draft for your review.
       </p>
+
+      <label className="field exploration-brief-field">
+        <span>What are you exploring in this batch?</span>
+        <textarea
+          value={explorationBrief}
+          onChange={e => persistExplorationBrief(e.target.value)}
+          placeholder="e.g. Ticket promised but email function never called; box change promised but update_box not executed; insurance verification repeated"
+          rows={3}
+          disabled={busy}
+        />
+        <p className="muted exploration-brief-hint">
+          Optional. Each call is judged only against this hypothesis. If there is no function trace (audio-only), the call is flagged for your review instead of guessing.
+        </p>
+      </label>
 
       <div className="row wrap">
         <div className="drop batch-drop">

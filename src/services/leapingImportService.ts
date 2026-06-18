@@ -16,6 +16,54 @@ import { id } from '../utils/text';
 import { nowIso } from '../utils/dates';
 import { extractEntitiesFromTranscript } from '../utils/entityExtract';
 import { buildReviewObject } from '../utils/reviewObject';
+import { buildMarieOperationTrace } from '../utils/marieOperationTrace';
+import { buildOperationalFailures, hasHighSeverityOperationalFailure, primaryOperationalFailure } from '../utils/operationalFailures';
+import { applyExplorationVerdict } from '../utils/explorationBrief';
+
+function findExistingLeapingMergeIndex(calls: CallReview[], normalized: { call: CallReview; rawId: string }) {
+  return calls.findIndex(
+    c =>
+      c.id === normalized.call.id ||
+      c.leaping_call_id === normalized.rawId ||
+      c.call_id === normalized.rawId
+  );
+}
+
+function mergeLeapingOntoExistingCall(existing: CallReview, normalized: CallReview, rawId: string): CallReview {
+  const merged = {
+    ...normalized,
+    ...existing,
+    id: existing.id,
+    call_id: existing.call_id || normalized.call_id,
+    leaping_call_id: rawId,
+    leaping_raw_id: rawId,
+    function_calls: normalized.function_calls,
+    leaping_transcript_events: normalized.leaping_transcript_events,
+    transitions: normalized.transitions,
+    operation_trace: normalized.operation_trace,
+    leaping_detail_url: normalized.leaping_detail_url || existing.leaping_detail_url,
+    leaping_status: normalized.leaping_status || existing.leaping_status,
+    leaping_snapshot_id: normalized.leaping_snapshot_id || existing.leaping_snapshot_id,
+    raw_metadata: normalized.raw_metadata || existing.raw_metadata,
+    recording_url: existing.recording_url || normalized.recording_url,
+    workspace: existing.workspace || normalized.workspace,
+    exploration_brief: existing.exploration_brief,
+    pinned: existing.pinned,
+    reviewer_call_notes: existing.reviewer_call_notes,
+    audio_local_path: existing.audio_local_path || normalized.audio_local_path,
+    audio_storage_key: existing.audio_storage_key || normalized.audio_storage_key,
+    audio_file_name: existing.audio_file_name || normalized.audio_file_name,
+    audio_file_size: existing.audio_file_size || normalized.audio_file_size,
+    audio_file_type: existing.audio_file_type || normalized.audio_file_type,
+    transcript: existing.transcript || normalized.transcript,
+    transcript_segments: existing.transcript_segments?.length ? existing.transcript_segments : normalized.transcript_segments
+  } as CallReview;
+
+  if (merged.exploration_brief?.trim()) {
+    return applyExplorationVerdict(merged, merged.exploration_brief) as CallReview;
+  }
+  return merged;
+}
 
 const MIN_CALL_SECONDS = 50;
 
@@ -222,67 +270,76 @@ function runSystemRules(call: Partial<CallReview>, transcript: string): Evidence
   const callId = call.id || '';
   const functions = call.function_calls || [];
   const transitions = call.transitions || [];
-  const names = functions.map(f => f.name.toLowerCase());
   const transitionBlob = transitions.map(t => `${t.from || ''} ${t.to || ''} ${t.node || ''} ${t.label || ''}`.toLowerCase()).join(' ');
   const lower = transcript.toLowerCase();
   const evidence: EvidenceMoment[] = [];
+  const trace = call.operation_trace || buildMarieOperationTrace(call);
+  const operational = buildOperationalFailures(call);
+  const primary = primaryOperationalFailure(call);
+  const failuresToStore = primary ? [primary] : operational.slice(0, 1);
 
-  const birthdayChecks = names.filter(n => /check[_-]?birthday|birthday|geburtsdatum/.test(n));
-  if (birthdayChecks.length > 1) {
+  for (const failure of failuresToStore) {
+    const momentType =
+      failure.kind === 'repeated_authentication' ? 'repeated_authentication' :
+      failure.kind === 'function_error' ? 'missing_integration' :
+      failure.kind === 'claimed_not_done' ? 'claimed_completion_without_execution' :
+      failure.kind === 'transferred_instead' ? 'avoidable_transfer' :
+      failure.kind === 'ticket_not_created' || failure.kind === 'ticket_creation_failed' ? 'missing_function_call' :
+      failure.kind === 'verification_missing' ? 'missing_alternative_verification' :
+      failure.kind === 'action_not_executed' ? 'missing_function_call' :
+      failure.kind === 'call_dropped' ? 'unresolved_request' :
+      failure.kind === 'transfer_broken' ? 'escalation' :
+      failure.kind === 'arg_mismatch' ? 'function_argument_mismatch' :
+      'other';
+    evidence.push(makeEvidence(callId, {
+      moment_type: momentType,
+      severity: failure.severity,
+      explanation: failure.detail,
+      recommended_fix: failure.fix || '',
+      linked_issue_suggestion: failure.kind
+    }));
+  }
+
+  // Repeated auth only when function was actually called twice (Marie-side), not missing customer data.
+  const birthdayChecks = functions.map(f => f.name.toLowerCase()).filter(n => /check[_-]?birthday|birthday|geburtsdatum/.test(n));
+  if (birthdayChecks.length > 1 && trace.preconditions.customer_provided_birthday) {
     evidence.push(makeEvidence(callId, {
       moment_type: 'repeated_authentication',
-      severity: 'high',
-      explanation: 'System rule: birthday verification was called more than once in this call.',
+      severity: 'medium',
+      explanation: 'Birthday verification function ran more than once after the caller already provided a birthday.',
       recommended_fix: 'Persist successful birthday verification and avoid repeated auth prompts.',
       linked_issue_suggestion: 'repeated_birthday_request'
     }));
   }
 
-  if (functions.some(f => f.status === 'error')) {
-    evidence.push(makeEvidence(callId, {
-      moment_type: 'missing_integration',
-      severity: 'high',
-      explanation: 'System rule: at least one function/tool call returned an error.',
-      recommended_fix: 'Inspect function arguments/result payload and add validation or fallback handling.',
-      linked_issue_suggestion: 'function_api_issue'
-    }));
-  }
-
-  if (includesAny(`${transitionBlob} ${lower}`, [/lieferstatus|shipment|delivery/]) && !names.some(n => /birthday|geburtsdatum|verify|auth/.test(n))) {
-    evidence.push(makeEvidence(callId, {
-      moment_type: 'missing_alternative_verification',
-      severity: 'high',
-      explanation: 'System rule: delivery-status handling appears before any detected verification function.',
-      recommended_fix: 'Require successful verification before account-specific delivery answers.',
-      linked_issue_suggestion: 'verification_skipped'
-    }));
-  }
-
-  if (/weiterleit|transfer|verbinde/.test(lower) && !/transfer|handoff/.test(transitionBlob)) {
+  if (/weiterleit|transfer|verbinde/.test(lower) && !/transfer|handoff/.test(transitionBlob) && !evidence.some(e => e.moment_type === 'escalation')) {
     evidence.push(makeEvidence(callId, {
       moment_type: 'escalation',
       severity: 'medium',
-      explanation: 'System rule: Marie said she would transfer, but no transfer transition/event was detected.',
+      explanation: 'Marie said she would transfer, but no transfer transition/event was detected.',
       recommended_fix: 'Verify transfer event emission and fallback when transfer fails.',
       linked_issue_suggestion: 'transfer_failed'
-    }));
-  }
-
-  if ((call.marie_call_status === 'dropped' || call.leaping_status === 'dropped') && call.marie_main_result !== 'unresolved') {
-    evidence.push(makeEvidence(callId, {
-      moment_type: 'unresolved_request',
-      severity: 'medium',
-      explanation: 'System rule: call status is dropped although result signals suggest the conversation may have completed.',
-      recommended_fix: 'Review Leaping status mapping and completion/drop classification.',
-      linked_issue_suggestion: 'completion_drop_mismatch'
     }));
   }
 
   return evidence;
 }
 
+export function refreshCallSystemEvidence(call: Partial<CallReview>, existing: EvidenceMoment[]): EvidenceMoment[] {
+  const withTrace = {
+    ...call,
+    operation_trace: call.operation_trace || buildMarieOperationTrace(call)
+  };
+  const system = runSystemRules(withTrace, call.transcript || '');
+  const kept = existing.filter(e => e.call_id === call.id && e.source !== 'system_rule');
+  return [...system, ...kept];
+}
 
-export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evidence: EvidenceMoment[]; rawId: string } {
+
+export function normalizeLeapingCall(
+  rawValue: unknown,
+  opts?: { workspace?: CallReview['workspace'] }
+): { call: CallReview; evidence: EvidenceMoment[]; rawId: string } {
   const raw = asObj(rawValue);
   const events = rawTranscriptEvents(raw);
   const endFields = endFieldsFromEvents(events);
@@ -320,8 +377,9 @@ export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evi
     leaping_raw_id: rawId,
     date: dateRaw.slice(0, 10),
     duration_seconds: Math.round(
-      firstNumber(raw, ['duration', 'duration_seconds', 'leaping_duration_seconds', 'duration_sec']) ||
-      firstNumber(endFields, ['leaping_call_duration'])
+      firstNumber(raw, ['leaping_duration_seconds', 'duration_sec']) ||
+      firstNumber(endFields, ['leaping_call_duration', 'leaping_duration_seconds']) ||
+      firstNumber(raw, ['duration_seconds', 'duration'])
     ),
     customer_type: '',
     caller_context: summary,
@@ -381,7 +439,7 @@ export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evi
       end_fields: endFields
     },
     linked_issue_ids: [],
-    workspace: 'production',
+    workspace: opts?.workspace || 'production',
     bot_version: 'production',
     imported_at: now,
     review_status: 'new',
@@ -389,10 +447,21 @@ export function normalizeLeapingCall(rawValue: unknown): { call: CallReview; evi
     updated_at: now
   } as CallReview;
 
+  call.operation_trace = buildMarieOperationTrace(call);
   const evidence = runSystemRules(call, transcript);
-  call.primary_issue_label = evidence[0]?.linked_issue_suggestion || undefined;
+  const opsFailures = buildOperationalFailures(call);
+  call.primary_issue_label = opsFailures[0]?.label || evidence[0]?.linked_issue_suggestion || undefined;
   call.missing_integration = evidence.some(e => e.moment_type === 'missing_integration');
-  call.identification_problem = evidence.some(e => e.moment_type === 'repeated_authentication' || e.moment_type === 'missing_alternative_verification');
+  call.identification_problem = evidence.some(e => e.moment_type === 'repeated_authentication');
+  if (opsFailures.length) {
+    call.solved_status = opsFailures.some(f => f.severity === 'high') ? 'no' : 'partially';
+    call.overall_rating = opsFailures.some(f => f.severity === 'high') ? 4 : 5;
+    call.needs_review = true;
+  }
+  if (hasHighSeverityOperationalFailure(call)) {
+    call.pinned = true;
+    call.critical = true;
+  }
   call.review_object = buildReviewObject({ call, evidence, listenedToAudio: false });
 
   return { call, evidence, rawId };
@@ -411,6 +480,8 @@ function extractCallsPayload(payload: unknown): unknown[] {
 
 const TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const TOKEN_BUFFER_MS = 5 * 60 * 1000;
+const DEFAULT_IMPORT_LIMIT = 200;
+const DEFAULT_MAX_PAGES = 20;
 
 function isTokenValid(settings: Settings): boolean {
   const token = settings.leapingAccessToken?.trim();
@@ -425,6 +496,92 @@ interface LoginResult {
   refreshToken?: string;
   expiresAt: string;
   settingsPatch: Partial<Settings>;
+}
+
+function parseAuthPayload(bodyText: string, httpStatus: number, loginUrl: string): LoginResult {
+  let json: unknown;
+  try {
+    json = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`Auth endpoint returned non-JSON (HTTP ${httpStatus}).`);
+  }
+
+  const obj = json && typeof json === 'object' && !Array.isArray(json) ? json as Record<string, unknown> : {};
+
+  const accessToken =
+    typeof obj.access_token === 'string' ? obj.access_token :
+    typeof obj.token === 'string' ? obj.token :
+    typeof obj.accessToken === 'string' ? obj.accessToken : '';
+
+  if (!accessToken) {
+    throw new Error(
+      `Auth succeeded (HTTP ${httpStatus}) but no access_token in response.\n` +
+      `Response keys: ${Object.keys(obj).join(', ') || '(none)'}`
+    );
+  }
+
+  const refreshToken =
+    typeof obj.refresh_token === 'string' ? obj.refresh_token :
+    typeof obj.refreshToken === 'string' ? obj.refreshToken : undefined;
+
+  let expiresAt: string;
+  if (typeof obj.expires_in === 'number') {
+    expiresAt = new Date(Date.now() + obj.expires_in * 1000).toISOString();
+  } else if (typeof obj.expires_at === 'string') {
+    expiresAt = obj.expires_at;
+  } else {
+    expiresAt = new Date(Date.now() + TOKEN_LIFETIME_MS).toISOString();
+  }
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt,
+    settingsPatch: {
+      leapingAccessToken: accessToken,
+      leapingRefreshToken: refreshToken ?? undefined,
+      leapingTokenExpiresAt: expiresAt
+    }
+  };
+}
+
+export async function refreshLeapingToken(settings: Settings): Promise<LoginResult> {
+  const refreshToken = settings.leapingRefreshToken?.trim();
+  if (!refreshToken) {
+    throw new Error('No refresh token stored — use Test Leaping login once to cache credentials.');
+  }
+
+  const refreshUrl = (settings.leapingRefreshUrl || 'https://api.leaping.ai/v1/auth/refresh').trim();
+  const loginUrl = (settings.leapingLoginUrl || 'https://api.leaping.ai/v1/auth/login').trim();
+
+  const attempts: Array<{ url: string; contentType: string; body: string }> = [
+    { url: refreshUrl, contentType: 'application/json', body: JSON.stringify({ refresh_token: refreshToken }) },
+    { url: refreshUrl, contentType: 'application/json', body: JSON.stringify({ refreshToken }) },
+    { url: loginUrl, contentType: 'application/json', body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: refreshToken }) }
+  ];
+
+  let lastError = 'Refresh failed';
+  for (const attempt of attempts) {
+    try {
+      const res = await fetch(attempt.url, {
+        method: 'POST',
+        headers: { 'Content-Type': attempt.contentType, Accept: 'application/json' },
+        body: attempt.body
+      });
+      const bodyText = await res.text().catch(() => '');
+      if (!res.ok) {
+        lastError = `HTTP ${res.status} from ${attempt.url}: ${bodyText.slice(0, 200)}`;
+        continue;
+      }
+      const result = parseAuthPayload(bodyText, res.status, attempt.url);
+      console.info('[leaping-auth] refresh success', { url: attempt.url, expiresAt: result.expiresAt });
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  throw new Error(`Leaping token refresh failed.\n${lastError}`);
 }
 
 export async function loginToLeaping(settings: Settings): Promise<LoginResult> {
@@ -492,173 +649,230 @@ export async function loginToLeaping(settings: Settings): Promise<LoginResult> {
     throw new Error(`Login endpoint returned non-JSON (HTTP ${res.status}).`);
   }
 
-  const obj = json && typeof json === 'object' && !Array.isArray(json) ? json as Record<string, unknown> : {};
-
-  const accessToken =
-    typeof obj.access_token === 'string' ? obj.access_token :
-    typeof obj.token === 'string' ? obj.token :
-    typeof obj.accessToken === 'string' ? obj.accessToken : '';
-
-  if (!accessToken) {
-    throw new Error(
-      `Login succeeded (HTTP ${res.status}) but no access_token in response.\n` +
-      `Response keys: ${Object.keys(obj).join(', ') || '(none)'}`
-    );
-  }
-
-  const refreshToken =
-    typeof obj.refresh_token === 'string' ? obj.refresh_token :
-    typeof obj.refreshToken === 'string' ? obj.refreshToken : undefined;
-
-  let expiresAt: string;
-  if (typeof obj.expires_in === 'number') {
-    expiresAt = new Date(Date.now() + obj.expires_in * 1000).toISOString();
-  } else if (typeof obj.expires_at === 'string') {
-    expiresAt = obj.expires_at;
-  } else {
-    expiresAt = new Date(Date.now() + TOKEN_LIFETIME_MS).toISOString();
-  }
+  const result = parseAuthPayload(bodyText, res.status, loginUrl);
 
   console.info('[leaping-auth] login success', {
     hasAccessToken: true,
-    hasRefreshToken: !!refreshToken,
-    expiresAt,
-    responseKeys: Object.keys(obj)
+    hasRefreshToken: !!result.refreshToken,
+    expiresAt: result.expiresAt,
+    responseKeys: json && typeof json === 'object' && !Array.isArray(json) ? Object.keys(json as object) : []
   });
 
-  return {
-    accessToken,
-    refreshToken,
-    expiresAt,
-    settingsPatch: {
-      leapingAccessToken: accessToken,
-      leapingRefreshToken: refreshToken,
-      leapingTokenExpiresAt: expiresAt
-    }
-  };
+  return result;
 }
 
-// ---------- Calls fetch ----------
+async function resolveLeapingAuth(db: Database): Promise<{ token: string; db: Database; usedManualToken: boolean }> {
+  let updatedDb = db;
+  const settings = () => updatedDb.settings;
+  const hasLoginConfig = !!(settings().leapingUsername?.trim() && settings().leapingPassword?.trim());
+  const hasRefresh = !!settings().leapingRefreshToken?.trim();
 
-export async function fetchLeapingCalls(db: Database): Promise<{ calls: unknown[]; db: Database }> {
-  const rawUrl = (db.settings.leapingApiUrl || '').trim();
-  if (!rawUrl) throw new Error('Add the Leaping calls API URL in Settings first.');
+  const applyAuth = (result: LoginResult) => {
+    updatedDb = { ...updatedDb, settings: { ...settings(), ...result.settingsPatch } };
+    return result.accessToken;
+  };
 
-  let callsUrl: URL;
-  try {
-    callsUrl = new URL(rawUrl);
-  } catch {
-    throw new Error(`Invalid Leaping API URL: "${rawUrl}"`);
+  if (isTokenValid(settings())) {
+    console.info('[leaping-auth] using cached token', { expiresAt: settings().leapingTokenExpiresAt });
+    return { token: settings().leapingAccessToken!.trim(), db: updatedDb, usedManualToken: false };
   }
 
-  if (!callsUrl.searchParams.has('limit')) callsUrl.searchParams.set('limit', '100');
-  const requestUrl = callsUrl.toString();
-
-  const hasLoginConfig = !!(db.settings.leapingUsername?.trim() && db.settings.leapingPassword?.trim());
-  let updatedDb = db;
-  let token = '';
-
-  if (isTokenValid(db.settings)) {
-    token = db.settings.leapingAccessToken!.trim();
-    console.info('[leaping-auth] using cached token', { expiresAt: db.settings.leapingTokenExpiresAt });
-  } else if (hasLoginConfig) {
-    console.info('[leaping-auth] token missing/expired — logging in');
+  if (hasRefresh) {
     try {
-      const loginResult = await loginToLeaping(db.settings);
-      token = loginResult.accessToken;
-      updatedDb = { ...db, settings: { ...db.settings, ...loginResult.settingsPatch } };
+      console.info('[leaping-auth] token expired — refreshing');
+      return { token: applyAuth(await refreshLeapingToken(settings())), db: updatedDb, usedManualToken: false };
+    } catch (refreshErr) {
+      console.warn('[leaping-auth] refresh failed', refreshErr instanceof Error ? refreshErr.message : refreshErr);
+    }
+  }
+
+  if (hasLoginConfig) {
+    console.info('[leaping-auth] logging in with username/password');
+    try {
+      return { token: applyAuth(await loginToLeaping(settings())), db: updatedDb, usedManualToken: false };
     } catch (loginErr) {
-      const manualToken = (db.settings.leapingApiKey || '').trim();
+      const manualToken = (settings().leapingApiKey || '').trim();
       if (manualToken) {
         console.warn('[leaping-auth] login failed, falling back to manual Bearer token', {
           error: loginErr instanceof Error ? loginErr.message : String(loginErr)
         });
-        token = manualToken;
-      } else {
-        throw loginErr;
+        return { token: manualToken, db: updatedDb, usedManualToken: true };
       }
-    }
-  } else {
-    token = (db.settings.leapingApiKey || '').trim();
-    if (!token) {
-      throw new Error(
-        'No Leaping credentials configured.\n' +
-        'Either add a username + password, or paste a manual Bearer token in Settings.'
-      );
+      throw loginErr;
     }
   }
 
-  const makeRequest = async (authToken: string): Promise<Response> => {
+  const manualToken = (settings().leapingApiKey || '').trim();
+  if (!manualToken) {
+    throw new Error(
+      'No Leaping credentials configured.\n' +
+      'Add username + password in Settings (recommended — auto-refresh). Manual Bearer tokens expire in minutes.'
+    );
+  }
+  return { token: manualToken, db: updatedDb, usedManualToken: true };
+}
+
+function importLimit(settings: Settings) {
+  const n = settings.leapingImportLimit ?? DEFAULT_IMPORT_LIMIT;
+  return Math.max(1, Math.min(500, Math.round(n)));
+}
+
+function importMaxPages(settings: Settings) {
+  const n = settings.leapingImportMaxPages ?? DEFAULT_MAX_PAGES;
+  return Math.max(1, Math.min(100, Math.round(n)));
+}
+
+function buildCallsPageUrl(baseUrl: string, settings: Settings, offset: number) {
+  const url = new URL(baseUrl.trim());
+  const limit = importLimit(settings);
+  url.searchParams.set('limit', String(limit));
+  if (offset > 0) url.searchParams.set('offset', String(offset));
+  else url.searchParams.delete('offset');
+  return url.toString();
+}
+
+function callPayloadId(raw: unknown) {
+  return firstString(asObj(raw), ['id', 'call_id', 'conversation_id', 'uuid']);
+}
+
+async function reauthenticate(db: Database): Promise<{ token: string; db: Database }> {
+  let updatedDb = db;
+  const settings = () => updatedDb.settings;
+  const hasRefresh = !!settings().leapingRefreshToken?.trim();
+  const hasLogin = !!(settings().leapingUsername?.trim() && settings().leapingPassword?.trim());
+
+  if (hasRefresh) {
+    try {
+      const refreshed = await refreshLeapingToken(settings());
+      updatedDb = { ...updatedDb, settings: { ...settings(), ...refreshed.settingsPatch } };
+      return { token: refreshed.accessToken, db: updatedDb };
+    } catch {
+      /* try login */
+    }
+  }
+
+  if (hasLogin) {
+    const loginResult = await loginToLeaping(settings());
+    updatedDb = { ...updatedDb, settings: { ...settings(), ...loginResult.settingsPatch } };
+    return { token: loginResult.accessToken, db: updatedDb };
+  }
+
+  throw new Error('Leaping token invalid or expired — add username/password in Settings or click Test Leaping login.');
+}
+
+// ---------- Calls fetch ----------
+
+export async function fetchLeapingCalls(
+  db: Database
+): Promise<{ calls: unknown[]; db: Database; pagesFetched: number; limitPerPage: number }> {
+  const rawUrl = (db.settings.leapingApiUrl || '').trim();
+  if (!rawUrl) throw new Error('Add the Leaping calls API URL in Settings first.');
+
+  try {
+    new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid Leaping API URL: "${rawUrl}"`);
+  }
+
+  const limitPerPage = importLimit(db.settings);
+  const maxPages = importMaxPages(db.settings);
+
+  let { token, db: updatedDb, usedManualToken } = await resolveLeapingAuth(db);
+
+  const makeRequest = async (authToken: string, pageUrl: string): Promise<Response> => {
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (authToken) headers.Authorization = `Bearer ${authToken}`;
-    console.info('[leaping-import] fetching calls', { url: requestUrl, hasToken: !!authToken });
-    return fetch(requestUrl, { headers });
+    console.info('[leaping-import] fetching calls', { url: pageUrl, hasToken: !!authToken });
+    return fetch(pageUrl, { headers });
   };
 
-  let res: Response;
-  try {
-    res = await makeRequest(token);
-  } catch (err) {
-    throw new Error('Network error — could not reach Leaping API. Check URL and internet connection.');
-  }
+  const parsePage = async (res: Response): Promise<unknown[]> => {
+    if (res.status === 401 || res.status === 403) {
+      const reauth = await reauthenticate(updatedDb);
+      token = reauth.token;
+      updatedDb = reauth.db;
+      throw new Error('__RETRY_AUTH__');
+    }
 
-  // 401/403 → try re-login and retry once
-  if ((res.status === 401 || res.status === 403) && hasLoginConfig) {
-    console.warn('[leaping-import] got', res.status, '— re-authenticating');
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error('[leaping-import] non-OK response', { status: res.status, body: body.slice(0, 200) });
+      throw new Error(body.slice(0, 300) || `Leaping import failed (HTTP ${res.status})`);
+    }
+
+    let json: unknown;
     try {
-      const loginResult = await loginToLeaping(updatedDb.settings);
-      token = loginResult.accessToken;
-      updatedDb = { ...updatedDb, settings: { ...updatedDb.settings, ...loginResult.settingsPatch } };
-      res = await makeRequest(token);
-    } catch (retryErr) {
-      throw new Error(
-        `Leaping re-authentication failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`
-      );
+      json = await res.json();
+    } catch {
+      throw new Error('Leaping API returned malformed JSON.');
     }
-  }
 
-  console.info('[leaping-import] calls response', { status: res.status, ok: res.ok });
-
-  if (res.status === 401 || res.status === 403) {
-    throw new Error('Leaping token invalid or expired — check credentials in Settings.');
-  }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    console.error('[leaping-import] non-OK response', { status: res.status, body: body.slice(0, 200) });
-    throw new Error(body.slice(0, 300) || `Leaping import failed (HTTP ${res.status})`);
-  }
-
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    throw new Error('Leaping API returned malformed JSON.');
-  }
-
-  // {"detail": "Invalid token"} as HTTP 200 — invalidate cache and surface error
-  if (json && typeof json === 'object' && !Array.isArray(json)) {
-    const obj = json as Record<string, unknown>;
-    if (typeof obj.detail === 'string' && /invalid token/i.test(obj.detail)) {
-      updatedDb = {
-        ...updatedDb,
-        settings: { ...updatedDb.settings, leapingAccessToken: undefined, leapingTokenExpiresAt: undefined }
-      };
-      throw new Error('Leaping returned "Invalid token" — cached token cleared. Try importing again to re-login.');
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      const obj = json as Record<string, unknown>;
+      if (typeof obj.detail === 'string' && /invalid token/i.test(obj.detail)) {
+        updatedDb = {
+          ...updatedDb,
+          settings: { ...updatedDb.settings, leapingAccessToken: undefined, leapingTokenExpiresAt: undefined }
+        };
+        const reauth = await reauthenticate(updatedDb);
+        token = reauth.token;
+        updatedDb = reauth.db;
+        throw new Error('__RETRY_AUTH__');
+      }
     }
+
+    return extractCallsPayload(json);
+  };
+
+  const merged: unknown[] = [];
+  const seenIds = new Set<string>();
+  let pagesFetched = 0;
+  let offset = 0;
+
+  while (pagesFetched < maxPages) {
+    const pageUrl = buildCallsPageUrl(rawUrl, updatedDb.settings, offset);
+    let page: unknown[];
+
+    try {
+      const res = await makeRequest(token, pageUrl);
+      page = await parsePage(res);
+    } catch (err) {
+      if (err instanceof Error && err.message === '__RETRY_AUTH__') {
+        const res = await makeRequest(token, pageUrl);
+        page = await parsePage(res);
+      } else {
+        throw err;
+      }
+    }
+
+    pagesFetched += 1;
+    let added = 0;
+    for (const item of page) {
+      const id = callPayloadId(item);
+      const key = id || `__idx_${merged.length}`;
+      if (seenIds.has(key)) continue;
+      seenIds.add(key);
+      merged.push(item);
+      added += 1;
+    }
+
+    console.info('[leaping-import] page', { pagesFetched, offset, pageSize: page.length, added, total: merged.length });
+
+    if (!page.length || page.length < limitPerPage || added === 0) break;
+    offset += limitPerPage;
   }
 
-  console.info('[leaping-import] response', {
-    bodyType: Array.isArray(json) ? 'array' : typeof json,
-    keys: json && typeof json === 'object' && !Array.isArray(json) ? Object.keys(json as object).slice(0, 10) : null
+  if (usedManualToken) {
+    console.warn('[leaping-import] using manual Bearer token — it may expire quickly. Prefer username/password in Settings.');
+  }
+
+  console.info('[leaping-import] fetch complete', {
+    pagesFetched,
+    limitPerPage,
+    totalCalls: merged.length
   });
 
-  const calls = extractCallsPayload(json);
-  console.info('[leaping-import] extracted calls', {
-    count: calls.length,
-    firstId: calls[0] ? firstString(asObj(calls[0]), ['id', 'call_id', 'conversation_id']) : null
-  });
-  return { calls, db: updatedDb };
+  return { calls: merged, db: updatedDb, pagesFetched, limitPerPage };
 }
 
 async function downloadRecordingToFile(url: string, callId: string): Promise<File | null> {
@@ -681,7 +895,8 @@ async function downloadRecordingToFile(url: string, callId: string): Promise<Fil
 
 export async function importLeapingRawCalls(
   db: Database,
-  rawCalls: unknown[]
+  rawCalls: unknown[],
+  opts?: { workspace?: CallReview['workspace'] }
 ): Promise<{ db: Database; imported: number; updated: number; skipped: number }> {
   console.info('[leaping-import] importLeapingRawCalls start', { rawCallsCount: rawCalls.length });
   const now = nowIso();
@@ -696,7 +911,7 @@ export async function importLeapingRawCalls(
   for (const raw of rawCalls) {
     let normalized: ReturnType<typeof normalizeLeapingCall>;
     try {
-      normalized = normalizeLeapingCall(raw);
+      normalized = normalizeLeapingCall(raw, { workspace: opts?.workspace });
     } catch (error) {
       const callId = firstString(asObj(raw), ['id', 'call_id', 'conversation_id']);
       console.error('[leaping-import] normalize failed', {
@@ -758,17 +973,9 @@ export async function importLeapingRawCalls(
       }
     }
 
-    const existingIndex = calls.findIndex(c => c.id === normalized.call.id || c.leaping_call_id === normalized.rawId);
+    const existingIndex = findExistingLeapingMergeIndex(calls, normalized);
     if (existingIndex >= 0) {
-      calls[existingIndex] = {
-        ...calls[existingIndex],
-        ...normalized.call,
-        pinned: calls[existingIndex].pinned,
-        reviewer_call_notes: calls[existingIndex].reviewer_call_notes,
-        // Keep existing local audio if already downloaded
-        audio_local_path: calls[existingIndex].audio_local_path || normalized.call.audio_local_path,
-        audio_storage_key: calls[existingIndex].audio_storage_key || normalized.call.audio_storage_key
-      };
+      calls[existingIndex] = mergeLeapingOntoExistingCall(calls[existingIndex], normalized.call, normalized.rawId);
       updated++;
     } else {
       calls.unshift(normalized.call);

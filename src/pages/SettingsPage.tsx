@@ -7,8 +7,12 @@ import {
   clearDb,
   clearProductionCalls,
   clearTestCalls,
+  clearAllCallsAndDrafts,
+  compactStoredDatabase,
+  estimateStorageKbAsync,
   resetDemoDb
 } from '../services/storageService';
+import { getDatabaseFilePath } from '../services/diskDatabaseService';
 import { exportData, importData } from '../services/importExportService';
 import { testKey, applyRecalculatedResultLabels } from '../services/openaiService';
 import { getAudioStorageDirectory, isTauriApp } from '../services/audioStorageService';
@@ -23,6 +27,8 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
   const [leapingTestMsg, setLeapingTestMsg] = useState('');
   const [leapingTestBusy, setLeapingTestBusy] = useState(false);
   const [storagePath, setStoragePath] = useState('');
+  const [dbFilePath, setDbFilePath] = useState('');
+  const [storageInfo, setStorageInfo] = useState('');
   const [clearAction, setClearAction] = useState<ClearAction>(null);
   const [newAreaLabel, setNewAreaLabel] = useState('');
   const settings = db.settings;
@@ -31,10 +37,22 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
   useEffect(() => {
     if (isTauriApp()) {
       getAudioStorageDirectory().then(p => setStoragePath(p || 'Unavailable'));
+      getDatabaseFilePath().then(p => setDbFilePath(p || 'Unavailable'));
     } else {
       setStoragePath('Browser mode — audio in localStorage (dev only)');
+      setDbFilePath('Browser mode — database in localStorage');
     }
-  }, []);
+    void estimateStorageKbAsync().then(u => {
+      if (u.onDisk || u.diskKb > 0) {
+        setStorageInfo(`Call library on disk: ~${u.diskKb} KB · ${db.calls.length} calls`);
+      } else {
+        setStorageInfo(
+          `Browser cache: ~${u.totalKb} KB of ~5 MB · DB ${u.mainKb} KB` +
+            (u.audioKb > 0 ? ` · audio cache ${u.audioKb} KB` : ' · audio on disk')
+        );
+      }
+    });
+  }, [db.calls.length]);
 
   function patch(p: Partial<typeof settings>) {
     setDb({ ...db, settings: { ...settings, ...p } });
@@ -137,6 +155,39 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <label className="field">
+          <span>Import batch size (per page)</span>
+          <input
+            type="number"
+            min={1}
+            max={500}
+            value={settings.leapingImportLimit ?? 200}
+            onChange={e => patch({ leapingImportLimit: Number(e.target.value) || 200 })}
+          />
+        </label>
+        <p className="muted privacy">
+          Fetches up to {(settings.leapingImportMaxPages ?? 20) * (settings.leapingImportLimit ?? 200)} calls
+          ({settings.leapingImportMaxPages ?? 20} pages × {settings.leapingImportLimit ?? 200}).
+          Remove <code>limit=10</code> from the URL above — the app sets limit from this field.
+        </p>
+        <label className="field">
+          <span>Max pages to fetch</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={settings.leapingImportMaxPages ?? 20}
+            onChange={e => patch({ leapingImportMaxPages: Number(e.target.value) || 20 })}
+          />
+        </label>
+        <label className="field">
+          <span>Refresh endpoint URL</span>
+          <input
+            value={settings.leapingRefreshUrl || 'https://api.leaping.ai/v1/auth/refresh'}
+            onChange={e => patch({ leapingRefreshUrl: e.target.value })}
+            placeholder="https://api.leaping.ai/v1/auth/refresh"
+          />
+        </label>
+        <label className="field">
           <span>Login endpoint URL</span>
           <input
             value={settings.leapingLoginUrl || ''}
@@ -205,9 +256,9 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           />
         </label>
         <p className="muted privacy">
-          All credentials stored in browser localStorage — local only.
-          The app logs in automatically using username/password and caches the token for 24 hours.
-          The manual Bearer token above is used only if login credentials are not set.
+          Stored locally on your Mac only.
+          <strong> Use username + password</strong> — the app logs in automatically and refreshes tokens (no copying Bearer from browser DevTools).
+          Manual Bearer below is a short-lived fallback only.
         </p>
       </section>
 
@@ -387,15 +438,30 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           <span>Recording directory (app-managed)</span>
           <input value={storagePath} readOnly />
         </label>
+        <label className="field">
+          <span>Call library file (desktop app)</span>
+          <input value={dbFilePath} readOnly />
+        </label>
         <p className="muted privacy">
-          Call data lives in localStorage key <code>{DB_KEY}</code>. On first launch, data migrates from{' '}
-          <code>ai-call-qa-cockpit-db-v1</code> with production workspace tags.
+          {storageInfo}.
+          {(db.drafts || []).length > 0 && ` ${(db.drafts || []).length} inbox drafts.`}
+          {' '}Notes stay in a separate small cache. On desktop, calls are not limited to 5 MB.
         </p>
       </section>
 
       <section className="panel">
         <h2>Data</h2>
         <div className="row wrap">
+          <button
+            type="button"
+            className="primary-soft"
+            onClick={() => {
+              setDb(compactStoredDatabase(db));
+              setMsg('Freed storage by trimming raw Leaping payloads. Your calls and notes are kept.');
+            }}
+          >
+            Free storage
+          </button>
           <button type="button" onClick={() => navigator.clipboard.writeText(exportData(db))}>
             Export JSON
           </button>
@@ -416,6 +482,23 @@ export function SettingsPage({ db, setDb }: { db: Database; setDb: (db: Database
           </button>
           <button type="button" className="btn-danger-soft" onClick={() => setClearAction('production')}>
             Clear production calls
+          </button>
+          <button
+            type="button"
+            className="btn-danger-soft"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `Delete all ${db.calls.length} calls and ${(db.drafts || []).length} inbox drafts? Notes and settings are kept.`
+                )
+              ) {
+                return;
+              }
+              setDb(clearAllCallsAndDrafts(db));
+              setMsg('Cleared all calls and inbox drafts. Notes and settings kept.');
+            }}
+          >
+            Clear all calls &amp; drafts
           </button>
           <button type="button" className="btn-danger-soft" onClick={() => setClearAction('test')}>
             Clear test calls

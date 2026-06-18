@@ -37,17 +37,23 @@ export function CallsPage({
   setDb,
   selectedCallId,
   selectedEvidenceId,
+  issueFilterId,
+  onClearIssueFilter,
   onClearSelection,
   initialWorkspace,
-  onWorkspaceChange
+  onWorkspaceChange,
+  openInbox
 }: {
   db: Database;
   setDb: (db: Database) => void;
   selectedCallId?: string;
   selectedEvidenceId?: string;
+  issueFilterId?: string;
+  onClearIssueFilter?: () => void;
   onClearSelection?: () => void;
   initialWorkspace?: 'production' | 'test';
   onWorkspaceChange?: (workspace: 'production' | 'test') => void;
+  openInbox?: () => void;
 }) {
   const saved = loadSavedFilters();
   const [workspace, setWorkspaceState] = useState<'production' | 'test'>(
@@ -73,6 +79,10 @@ export function CallsPage({
   const [deleteCallId, setDeleteCallId] = useState<string | null>(null);
   const [importingLeaping, setImportingLeaping] = useState(false);
   const [leapingMsg, setLeapingMsg] = useState('');
+
+  useEffect(() => {
+    if (initialWorkspace) setWorkspaceState(initialWorkspace);
+  }, [initialWorkspace]);
 
   useEffect(() => {
     if (selectedCallId) setDetail(db.calls.find(c => c.id === selectedCallId) || null);
@@ -101,6 +111,7 @@ export function CallsPage({
 
   const filteredCalls = useMemo(() => {
     return scopeCalls.filter(c => {
+      if (issueFilterId && !(c.linked_issue_ids || []).includes(issueFilterId)) return false;
       const ev = db.evidence.filter(e => e.call_id === c.id);
       return (
         callMatchesSearch(c, ev, q) &&
@@ -112,7 +123,9 @@ export function CallsPage({
         matchesEvidenceTypeFilter(ev, evidenceTypeFilter)
       );
     });
-  }, [scopeCalls, db.evidence, q, requestFilter, resultFilter, mainIssueFilter, triageFilter, reviewStatusFilter, evidenceTypeFilter]);
+  }, [scopeCalls, db.evidence, q, requestFilter, resultFilter, mainIssueFilter, triageFilter, reviewStatusFilter, evidenceTypeFilter, issueFilterId]);
+
+  const issueFilter = issueFilterId ? db.issues.find(i => i.id === issueFilterId) : undefined;
 
   const rows = useMemo(() => [...filteredCalls].sort(sortCallsForReview), [filteredCalls]);
   const groups = useMemo(() => groupCalls(rows, db.evidence, groupBy), [rows, db.evidence, groupBy]);
@@ -183,13 +196,17 @@ export function CallsPage({
     setImportingLeaping(true);
     setLeapingMsg('Importing Leaping calls...');
     try {
-      const { calls: raw, db: dbAfterFetch } = await fetchLeapingCalls(db);
+      const { calls: raw, db: dbAfterFetch, pagesFetched, limitPerPage } = await fetchLeapingCalls(db);
       console.info('[leaping-import] fetch complete, processing', raw.length, 'calls');
-      const result = await importLeapingRawCalls(dbAfterFetch, raw);
+      const result = await importLeapingRawCalls(dbAfterFetch, raw, { workspace });
       console.info('[leaping-import] processing complete — imported:', result.imported, 'updated:', result.updated, 'skipped:', result.skipped);
       setDb(result.db);
       console.info('[leaping-import] db updated');
-      const parts = [`${result.imported} new`, `${result.updated} updated`];
+      const parts = [
+        `${raw.length} fetched (${pagesFetched} page${pagesFetched !== 1 ? 's' : ''} × ${limitPerPage})`,
+        `${result.imported} new`,
+        `${result.updated} updated`
+      ];
       if (result.skipped > 0) parts.push(`${result.skipped} skipped (< 50s)`);
       setLeapingMsg(`Leaping import complete: ${parts.join(', ')}.`);
     } catch (e) {
@@ -231,6 +248,11 @@ export function CallsPage({
           >
             {importingLeaping ? 'Importing...' : 'Import Leaping'}
           </button>
+          {openInbox && (
+            <button type="button" onClick={openInbox}>
+              File imports
+            </button>
+          )}
           <button
             type="button"
             className={workspace === 'production' ? 'primary-soft' : ''}
@@ -255,6 +277,18 @@ export function CallsPage({
             {typeof db.leapingLastImportAt === 'string' && db.leapingLastImportAt && (
               <span className="badge blue">Last import {db.leapingLastImportAt.slice(0, 16).replace('T', ' ')}</span>
             )}
+          </div>
+        </section>
+      )}
+
+      {issueFilter && (
+        <section className="panel issue-filter-banner">
+          <div className="row between wrap">
+            <div>
+              <strong>Issue filter:</strong> {issueFilter.title}
+              <p className="muted">{rows.length} linked call{rows.length !== 1 ? 's' : ''}</p>
+            </div>
+            <button type="button" className="btn-sm" onClick={onClearIssueFilter}>Clear issue filter</button>
           </div>
         </section>
       )}

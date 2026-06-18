@@ -70,3 +70,10 @@ export function addPersonalNote(db: Database, note: string): Database {
     ]
   };
 }
+
+export function deletePersonalNote(db: Database, noteId: string): Database {
+  return {
+    ...db,
+    personalNotes: (db.personalNotes || []).filter(note => note.id !== noteId)
+  };
+}

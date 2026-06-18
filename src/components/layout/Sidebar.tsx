@@ -1,10 +1,9 @@
-import { Inbox, LayoutDashboard, Menu, Mic, NotebookText, Settings, ShieldAlert } from 'lucide-react';
+import { LayoutDashboard, Menu, Mic, NotebookText, Settings, ShieldAlert } from 'lucide-react';
 
 export type PageKey = 'dashboard' | 'inbox' | 'calls' | 'issues' | 'notes' | 'settings';
 
 const items = [
   ['dashboard', 'Dashboard', LayoutDashboard],
-  ['inbox', 'Inbox', Inbox],
   ['calls', 'Calls', Mic],
   ['issues', 'Issues', ShieldAlert],
   ['notes', 'Notes', NotebookText],

@@ -13,11 +13,19 @@ export const upsertEvidence = (db: Database, ev: Partial<EvidenceMoment>) => {
   return finalizeDatabaseState({ ...db, evidence });
 };
 
-export const replaceEvidenceForCall = (db: Database, callId: string, moments: EvidenceMoment[]) =>
-  finalizeDatabaseState({
+export const replaceEvidenceForCall = (db: Database, callId: string, moments: EvidenceMoment[]) => {
+  const preserved = db.evidence.filter(e => e.call_id === callId && e.source === 'system_rule');
+  const merged = [...preserved, ...moments.filter(m => m.source !== 'system_rule')];
+  const byKey = new Map<string, EvidenceMoment>();
+  for (const ev of merged) {
+    const key = `${ev.source}:${ev.moment_type}:${ev.explanation?.slice(0, 80)}`;
+    if (!byKey.has(key)) byKey.set(key, ev);
+  }
+  return finalizeDatabaseState({
     ...db,
-    evidence: [...db.evidence.filter(e => e.call_id !== callId), ...moments]
+    evidence: [...db.evidence.filter(e => e.call_id !== callId), ...byKey.values()]
   });
+};
 
 export const deleteEvidence = (db: Database, evidenceId: string) => ({
   ...db,

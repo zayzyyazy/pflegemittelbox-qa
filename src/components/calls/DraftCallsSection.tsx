@@ -33,6 +33,7 @@ function ReadyRow({
       <span className="muted inbox-row-meta">{anliegen}</span>
       <span className={`inbox-row-result result-${result}`}>{result}</span>
       {findingCount > 0 && <span className="badge yellow">{findingCount} findings</span>}
+      {d.call.workspace === 'test' && <span className="badge blue">Test</span>}
       {d.duplicate_warning && <span className="badge gray">dup?</span>}
       <div className="inbox-row-actions">
         <button type="button" className="btn-sm primary" onClick={onSave}>Save</button>

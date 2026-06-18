@@ -114,6 +114,7 @@ export interface CallReview {
   leaping_transcript_events?: unknown[];
   function_calls?: MarieFunctionCall[];
   transitions?: MarieTransition[];
+  operation_trace?: MarieOperationTrace;
   raw_metadata?: Record<string, unknown>;
   imported_at?: string;
   import_batch_id?: string;
@@ -142,6 +143,8 @@ export interface CallReview {
   conversational_quality?: number;
   operational_reliability?: number;
   review_object?: ReviewObject;
+  exploration_brief?: string;
+  exploration_verdict?: string;
   pin_note?: string;
   pin_experiment_id?: string;
   crm_checked?: boolean;
@@ -165,4 +168,63 @@ export interface MarieTransition {
   node?: string;
   timestamp_seconds?: number;
   label?: string;
+}
+
+export type MarieOperationTraceStatus =
+  | 'not_applicable'
+  | 'missing_precondition'
+  | 'not_called'
+  | 'requested_no_result'
+  | 'failed'
+  | 'succeeded'
+  | 'arg_mismatch'
+  | 'claimed_without_execution'
+  | 'transferred_instead';
+
+export interface MarieOperationValueCheck {
+  field: 'vnr' | 'birthday' | 'phone' | 'email' | 'unknown';
+  customer_value?: string;
+  function_value?: string;
+  status: 'match' | 'mismatch' | 'missing_customer_value' | 'missing_function_value' | 'unknown';
+}
+
+export interface MarieOperationTrace {
+  expected_action:
+    | 'verify_customer'
+    | 'pause_or_cancel'
+    | 'change_box'
+    | 'delivery_status'
+    | 'address_or_account_change'
+    | 'ticket_or_transfer'
+    | 'unknown';
+  expected_functions: string[];
+  capability_supported: boolean;
+  preconditions: {
+    needs_vnr: boolean;
+    needs_birthday: boolean;
+    customer_provided_vnr: boolean;
+    customer_provided_birthday: boolean;
+    verification_function_called: boolean;
+    missing: Array<'vnr' | 'birthday'>;
+  };
+  customer_values: {
+    vnr?: string;
+    birthday?: string;
+    phone?: string;
+    email?: string;
+  };
+  observed: {
+    function_called: boolean;
+    requested_without_result: boolean;
+    function_failed: boolean;
+    transfer_claimed: boolean;
+    transfer_event: boolean;
+    completion_claimed: boolean;
+    execution_event: boolean;
+  };
+  value_checks: MarieOperationValueCheck[];
+  status: MarieOperationTraceStatus;
+  reason: string;
+  reviewer_flags: string[];
+  evidence_summary: string[];
 }

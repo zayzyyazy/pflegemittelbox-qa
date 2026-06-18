@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Database } from '../../services/storageService';
-import type { CallReview, TranscriptSegment } from '../../types/CallReview';
+import type { CallReview } from '../../types/CallReview';
+import { buildTranscriptSegments } from '../../utils/transcriptSegments';
 import type { DraftCall } from '../../types/DraftCall';
 import type { EvidenceMoment } from '../../types/EvidenceMoment';
 import { Modal } from '../ui/Modal';
@@ -30,21 +31,13 @@ import { ConfirmDeleteModal } from '../ui/ConfirmDeleteModal';
 import { FindingsStrip } from './FindingsStrip';
 import { FlagIssueModal } from './FlagIssueModal';
 import { LightweightEvidenceModal } from './LightweightEvidenceModal';
+import { FailureAnalysisPanel } from './FailureAnalysisPanel';
+import { addWorkspaceNote } from '../../services/workspaceNotesService';
+import { topOperationalLabel } from '../../utils/operationalFailures';
+import { applyExplorationVerdict, evaluateExplorationBrief } from '../../utils/explorationBrief';
 
-function buildSegments(call: Partial<CallReview>, draftTranscript?: string): TranscriptSegment[] {
-  if (call.transcript_segments?.length) return call.transcript_segments;
-  const text = call.transcript || draftTranscript || '';
-  if (!text.trim()) return [];
-  return text.split('\n').filter(Boolean).map((line, i) => {
-    const callerMatch = /^caller:\s*/i.test(line);
-    const agentMatch = /^agent:\s*/i.test(line);
-    return {
-      start: i,
-      end: i + 1,
-      text: line.replace(/^(caller|agent):\s*/i, '').trim() || line,
-      speaker: callerMatch ? 'caller' as const : agentMatch ? 'agent' as const : 'unknown' as const
-    };
-  });
+function buildSegments(call: Partial<CallReview>, draftTranscript?: string) {
+  return buildTranscriptSegments(call, draftTranscript);
 }
 
 export function CallReviewShell({
@@ -78,6 +71,8 @@ export function CallReviewShell({
     draft ? { ...draft.call } : { ...savedCall! }
   );
   const [note, setNote] = useState(call.reviewer_call_notes || '');
+  const [workspaceNote, setWorkspaceNote] = useState('');
+  const [noteSaved, setNoteSaved] = useState('');
   const [advanced, setAdvanced] = useState(false);
   const [seekSeconds, setSeekSeconds] = useState<number>();
   const [dup, setDup] = useState<{ call: CallReview; reason: string } | null>(null);
@@ -90,10 +85,17 @@ export function CallReviewShell({
   const [transcriptRange, setTranscriptRange] = useState<ReturnType<typeof mergeSegmentSelection> | null>(null);
   const [highlightDraft, setHighlightDraft] = useState<EvidenceMoment | null>(null);
   const [flagOpen, setFlagOpen] = useState(false);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
 
   const evidence = (isDraft ? draftEvidence : savedEvidence) as EvidenceMoment[];
   const mainIssue = deriveMainIssue(call as CallReview, evidence as EvidenceMoment[]);
-  const friction = formatFriction(call as CallReview, evidence as EvidenceMoment[]);
+  const friction = topOperationalLabel(call) || formatFriction(call as CallReview, evidence as EvidenceMoment[]);
+  const isExplorationTest = !!call.exploration_brief?.trim();
+  const liveExploration = useMemo(
+    () => (isExplorationTest ? evaluateExplorationBrief(call, call.exploration_brief!) : null),
+    [call, isExplorationTest]
+  );
+  const explorationTone = liveExploration?.verdict ?? null;
   const segments = useMemo(() => buildSegments(call, draft?.transcript), [call, draft?.transcript]);
   const callId = call.id || savedCall?.id || draft?.call.id || '';
   const title = isDraft
@@ -106,6 +108,15 @@ export function CallReviewShell({
     savedCall?.audio_storage_key
   );
   const reviewObject = call.review_object || savedCall?.review_object;
+  const summaryText = call.call_summary?.trim() || '';
+  const summaryLong = summaryText.length > 220;
+  const leapingEvents = call.leaping_transcript_events;
+  const hasLeapingDebug = !!(
+    call.leaping_call_id ||
+    call.function_calls?.length ||
+    call.transitions?.length ||
+    call.raw_metadata
+  );
 
   const update = (patch: Partial<CallReview>) => setCall(c => ({ ...c, ...patch }));
 
@@ -231,6 +242,19 @@ export function CallReviewShell({
     }
   }
 
+  function saveWorkspaceNote() {
+    const text = workspaceNote.trim();
+    if (!text) return;
+    setDb(addWorkspaceNote(db, {
+      kind: 'call',
+      call_id: call.call_id || call.id,
+      title: `Note · ${shortCallId(call.call_id || call.id || '')}`,
+      note: text
+    }));
+    setWorkspaceNote('');
+    setNoteSaved('Note saved to Notes.');
+  }
+
   function persistSavedCall() {
     if (!savedCall) return;
     const linked = call.linked_issue_ids || savedCall.linked_issue_ids || [];
@@ -289,8 +313,11 @@ export function CallReviewShell({
     try {
       const manual = savedEvidence.filter(e => e.source === 'manual' || !e.source);
       const { call: nextCall, evidence: nextEvidence } = await reanalyzeCall(db.settings, savedCall, manual);
-      setDb(finalizeDatabaseState(replaceEvidenceForCall(upsertCall(db, nextCall), savedCall.id, nextEvidence)));
-      setCall(nextCall);
+      const withExploration = savedCall.exploration_brief?.trim()
+        ? (applyExplorationVerdict(nextCall, savedCall.exploration_brief) as CallReview)
+        : nextCall;
+      setDb(finalizeDatabaseState(replaceEvidenceForCall(upsertCall(db, withExploration), savedCall.id, nextEvidence)));
+      setCall(withExploration);
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'Re-analysis failed');
     } finally {
@@ -378,12 +405,73 @@ export function CallReviewShell({
             </div>
           )}
 
-          <p className="call-friction-line">
-            <strong>Friction:</strong> {friction}
-          </p>
-          <p className="muted call-review-hint">
-            {isDraft ? '⌘↵ save · click a finding to jump transcript' : '⌘↵ done · click a finding to jump transcript'}
-          </p>
+          {!isExplorationTest && (
+            <p className="call-friction-line">
+              <strong>Friction:</strong> {friction}
+            </p>
+          )}
+
+          {isExplorationTest && liveExploration ? (
+            <section className={`panel exploration-result-block verdict-${explorationTone || 'unclear'}`}>
+              <h3>Exploration focus</h3>
+              <p className="muted exploration-brief-text">{call.exploration_brief}</p>
+
+              <div className="exploration-evidence-panel">
+                <strong>What the app can see</strong>
+                <p className="muted exploration-evidence-note">{liveExploration.evidenceNote}</p>
+                {liveExploration.functionsSeen.length > 0 ? (
+                  <ul className="exploration-fn-list">
+                    {liveExploration.functionsSeen.map(fn => (
+                      <li key={fn}><code>{fn}</code></li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted exploration-fn-missing">No send_email / create_ticket function in this record.</p>
+                )}
+                {call.leaping_call_id && (
+                  <p className="muted exploration-leaping-hint">
+                    Leaping ID: <code>{call.leaping_call_id}</code>
+                    {call.leaping_detail_url && (
+                      <> · <a href={call.leaping_detail_url} target="_blank" rel="noreferrer">Open in Leaping</a></>
+                    )}
+                  </p>
+                )}
+              </div>
+
+              <span className={`badge exploration-verdict-badge ${explorationTone === 'match' ? 'red' : explorationTone === 'no_match' ? 'green' : 'yellow'}`}>
+                {explorationTone === 'match'
+                  ? 'Hypothesis supported'
+                  : explorationTone === 'no_match'
+                    ? 'Hypothesis not supported'
+                    : 'Needs your review'}
+              </span>
+              <p className="exploration-verdict">{liveExploration.summary}</p>
+                {liveExploration.evidenceBasis === 'no_trace' && (
+                  <p className="muted exploration-brief-hint">
+                    WAV import has no function log. If the filename is the Leaping call ID, go to Calls → <strong>Import Leaping</strong> to attach send_email / ticket data to this call.
+                  </p>
+                )}
+                {liveExploration.needsReview && liveExploration.evidenceBasis !== 'no_trace' && (
+                  <p className="muted exploration-brief-hint">
+                    Auto-verdict withheld — confirm in Leaping Detailed view before deciding.
+                  </p>
+                )}
+            </section>
+          ) : isExplorationTest ? null : (
+            <FailureAnalysisPanel call={call} evidence={evidence as EvidenceMoment[]} />
+          )}
+
+          {!isExplorationTest && (
+            <FindingsStrip
+              call={call}
+              evidence={evidence}
+              onConfirm={confirmEvidence}
+              onDismiss={dismissEvidence}
+              onJumpToTime={s => setSeekSeconds(s + 0.01)}
+              onSelectFinding={selectFinding}
+              selectedFindingId={highlightedEvidenceId}
+            />
+          )}
 
           <div className="call-review-fields row wrap">
             <Field label="Anliegen">
@@ -411,24 +499,43 @@ export function CallReviewShell({
                 className="call-review-note-input"
                 value={note}
                 onChange={e => setNote(e.target.value)}
-                placeholder="Optional one-line note…"
+                placeholder="Optional one-line note (saved with call)…"
               />
             </Field>
           </div>
 
-          {call.call_summary && (
-            <p className="call-review-summary muted">{call.call_summary}</p>
+          <section className="panel call-workspace-note">
+            <div className="row between wrap">
+              <strong>Your note</strong>
+              <button type="button" className="btn-sm primary-soft" onClick={saveWorkspaceNote} disabled={!workspaceNote.trim()}>
+                Save to Notes
+              </button>
+            </div>
+            <textarea
+              value={workspaceNote}
+              onChange={e => setWorkspaceNote(e.target.value)}
+              placeholder="Paste call ID context, screenshot description, or what Marie did wrong… Saves separately and persists across restarts."
+            />
+            {noteSaved && <p className="muted">{noteSaved}</p>}
+          </section>
+
+          {summaryText && (
+            <div className="call-review-summary-block">
+              <div className="row between wrap">
+                <strong>Summary</strong>
+                {summaryLong && (
+                  <button type="button" className="btn-text" onClick={() => setSummaryExpanded(v => !v)}>
+                    {summaryExpanded ? 'Show less' : 'Show full summary'}
+                  </button>
+                )}
+              </div>
+              <p className={`call-review-summary${summaryExpanded ? ' expanded' : ''}`}>{summaryText}</p>
+            </div>
           )}
 
-          <FindingsStrip
-            call={call}
-            evidence={evidence}
-            onConfirm={confirmEvidence}
-            onDismiss={dismissEvidence}
-            onJumpToTime={s => setSeekSeconds(s + 0.01)}
-            onSelectFinding={selectFinding}
-            selectedFindingId={highlightedEvidenceId}
-          />
+          <p className="muted call-review-hint">
+            {isDraft ? '⌘↵ save · click a finding to jump transcript' : '⌘↵ done · click a finding to jump transcript'}
+          </p>
 
           {isDraft && draft?.duplicate_warning && (
             <p className="error">Possible duplicate — confirm before saving.</p>
@@ -466,11 +573,11 @@ export function CallReviewShell({
                   <option value="experimental">experimental</option>
                 </select>
               </Field>
-              {(call.leaping_call_id || call.function_calls?.length || call.transitions?.length || call.raw_metadata) && (
+              {hasLeapingDebug && (
                 <div className="debug-review-object">
                   <div className="row between wrap">
                     <div>
-                      <strong>Leaping data</strong>
+                      <strong>Leaping metadata</strong>
                       <p className="muted">
                         {[
                           call.marie_call_status || call.leaping_status,
@@ -484,24 +591,26 @@ export function CallReviewShell({
                       {call.leaping_detail_url && <a className="buttonlike btn-sm" href={call.leaping_detail_url} target="_blank" rel="noreferrer">Leaping detail</a>}
                     </div>
                   </div>
-                  <pre className="debug-json">
-                    {safeStringify(
-                      {
-                        leaping_call_id: call.leaping_call_id,
-                        customer: {
-                          phone: call.phone,
-                          name: call.customer_name,
-                          vnr: call.vnr,
-                          email: call.email,
-                          birthday: call.birthday
-                        },
-                        function_calls: call.function_calls,
-                        transitions: call.transitions,
-                        raw_metadata: call.raw_metadata
-                      }
-                    )}
-                  </pre>
-                  <LeapingTranscriptEvents events={call.leaping_transcript_events} />
+                  <details>
+                    <summary>Raw Leaping JSON</summary>
+                    <pre className="debug-json">
+                      {safeStringify(
+                        {
+                          leaping_call_id: call.leaping_call_id,
+                          customer: {
+                            phone: call.phone,
+                            name: call.customer_name,
+                            vnr: call.vnr,
+                            email: call.email,
+                            birthday: call.birthday
+                          },
+                          function_calls: call.function_calls,
+                          transitions: call.transitions,
+                          raw_metadata: call.raw_metadata
+                        }
+                      )}
+                    </pre>
+                  </details>
                 </div>
               )}
               <div className="debug-review-object">
@@ -554,15 +663,28 @@ export function CallReviewShell({
               onClear={() => setTranscriptRange(null)}
             />
           )}
-          <TranscriptReviewPanel
-            segments={segments}
-            filteredSegments={segments}
-            evidence={evidence as EvidenceMoment[]}
-            highlightedEvidenceId={highlightedEvidenceId}
-            onSelectRange={range => setTranscriptRange(range.text.length >= 3 ? range : null)}
-            onScrollToEvidence={setHighlightedEvidenceId}
-            onJumpToTime={s => setSeekSeconds(s + 0.01)}
-          />
+          <div className="call-review-transcript-body">
+            <TranscriptReviewPanel
+              segments={segments}
+              filteredSegments={segments}
+              evidence={evidence as EvidenceMoment[]}
+              highlightedEvidenceId={highlightedEvidenceId}
+              onSelectRange={range => setTranscriptRange(range.text.length >= 3 ? range : null)}
+              onScrollToEvidence={setHighlightedEvidenceId}
+              onJumpToTime={s => setSeekSeconds(s + 0.01)}
+            />
+            {!segments.length && (
+              <p className="muted transcript-empty-hint">
+                Transcript not stored for this call. Re-import from Leaping or use audio + re-score if needed.
+              </p>
+            )}
+          </div>
+          {advanced && !!leapingEvents?.length && (
+            <details className="call-review-leaping-events">
+              <summary>Debug: Leaping events ({leapingEvents.length})</summary>
+              <LeapingTranscriptEvents events={leapingEvents} />
+            </details>
+          )}
         </div>
       </div>
 
